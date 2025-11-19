@@ -1,0 +1,117 @@
+[project]
+name = "visual-odometry"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    # uv add <package> will automatically add here
+    "black[jupyter]>=25.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "isort",
+    "flake8",
+    "pytest",
+    "pre-commit",
+]
+
+# Black - Code Formatter
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+# isort - Import Sorting
+[tool.isort]
+profile = "black"
+py_version = 311
+
+# Mypy - Type Checking
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+show_error_codes = true
+# Disabled strict options for easier collaboration
+# disallow_untyped_defs = false  # Allow functions without type hints
+# no_implicit_optional = false   # Don't require Optional[] everywhere
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+# Pytest - Testing
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=visual_odometry",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-report=xml",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+# Coverage.py
+[tool.coverage.run]
+branch = true
+source = ["visual_odometry"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+precision = 2
+show_missing = true
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# Ruff - Fast Python Linter (Alternative to Flake8)
+# Uncomment if you want to use ruff instead of flake8
+# [tool.ruff]
+# line-length = 88
+# target-version = "py311"
+#
+# [tool.ruff.lint]
+# select = [
+#     "E",   # pycodestyle errors
+#     "W",   # pycodestyle warnings
+#     "F",   # pyflakes
+#     "I",   # isort
+#     "B",   # flake8-bugbear
+#     "C4",  # flake8-comprehensions
+#     "UP",  # pyupgrade
+# ]
+# ignore = [
+#     "E501",  # line too long (handled by black)
+#     "B008",  # do not perform function calls in argument defaults
+#     "C901",  # too complex
+# ]
+#
+# [tool.ruff.lint.per-file-ignores]
+# "__init__.py" = ["F401"]  # unused imports in __init__.py
