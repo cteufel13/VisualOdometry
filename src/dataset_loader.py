@@ -15,6 +15,7 @@ class BaseDataset(ABC):
 
         Args:
             base_path: The root directory of the dataset.
+
         """
         self.base_path = base_path
         self.K: np.ndarray | None = None
@@ -37,6 +38,7 @@ class KittiDataset(BaseDataset):
         Args:
             base_path: Root data directory.
             sequence: KITTI sequence number string (e.g. "05").
+
         """
         super().__init__(base_path)
         self.kitti_base = self.base_path / "kitti"
