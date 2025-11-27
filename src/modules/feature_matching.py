@@ -1,7 +1,7 @@
 import numpy as np
 
-from src.state.landmark_database import LandmarkDatabase
-from src.state.vo_state import VOState
+from state.landmark_database import LandmarkDatabase
+from state.vo_state import VOState
 
 
 def extract_and_match_features(
