@@ -50,8 +50,8 @@ python src/main.py -h
 # Run with default settings (KITTI sequence 05, OpenCV window)
 python src/main.py
 
-# Run with Rerun 3D visualization
-python src/main.py --use-rerun
+# Run with cv2 visualization instead of Rerun
+python src/main.py --cv2_viz
 
 # Run on a different dataset
 python src/main.py --dataset parking

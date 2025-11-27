@@ -221,8 +221,8 @@ class Args:
     # Sequence (only used for KITTI)
     sequence: str = "05"
 
-    # Visualization mode
-    use_rerun: bool = False
+    # Use cv2 for visualization instead of rerun
+    cv2_viz: bool = False
 
 
 def main(args: Args) -> None:
@@ -248,7 +248,7 @@ def main(args: Args) -> None:
     print(f"Camera Matrix K:\n{loader.K}\n")
 
     # 2. Initialize Rerun if requested
-    if args.use_rerun:
+    if not args.cv2_viz:
         init_rerun()
 
     # 3. Dummy Loop (Plays back images)
@@ -271,14 +271,14 @@ def main(args: Args) -> None:
         # -------------------------------------
 
         # Visualization
-        if args.use_rerun:
-            log_frame_rerun(img, T_cw, loader.K, i)
-        else:
+        if args.cv2_viz:
             # Standard OpenCV window
             cv2.imshow("VO Skeleton", img)
             cv2.setWindowTitle("VO Skeleton", f"Frame {i} - {args.dataset}")
             if cv2.waitKey(1) == 27:  # ESC to stop
                 break
+        else:
+            log_frame_rerun(img, T_cw, loader.K, i)
 
     cv2.destroyAllWindows()
     print("\nDone! Skeleton loop finished.")
