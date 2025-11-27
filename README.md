@@ -47,7 +47,7 @@ python src/main.py -h
 **Common Examples:**
 
 ```bash
-# Run with default settings (KITTI sequence 05, OpenCV window)
+# Run with default settings (KITTI sequence 05, Rerun visualization)
 python src/main.py
 
 # Run with cv2 visualization instead of Rerun
