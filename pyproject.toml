@@ -3,8 +3,12 @@ name = "visual-odometry"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "numpy>=2.2.6",
+    "opencv-python>=4.12.0.88",
     # uv add <package> will automatically add here
     "pre-commit>=4.4.0",
+    "rerun-sdk>=0.27.2",
+    "tyro>=0.9.35",
 ]
 
 [project.optional-dependencies]
@@ -107,6 +111,8 @@ ignore = [
     "D417",  # missing argument descriptions in docstring
     "PLR2004",  # magic value found
     "COM812",  # missing trailing comma in a collection
+    "N806",  # variable in function should be lowercase
+    "D104",  # missing docstring in public package
 ]
 fixable = ["ALL"]
 [tool.ruff.lint.per-file-ignores]

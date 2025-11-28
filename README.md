@@ -18,7 +18,7 @@ uv sync
 # Activate environment
 source .venv/bin/activate
 
-# Install pre-commit hooks
+# (if developing) Install pre-commit hooks
 pre-commit install
 ```
 
@@ -34,4 +34,28 @@ data/
 ├── malaga/
 ├── parking/
 └── my_dataset/
+```
+
+### 3\. Execution
+
+We use `tyro` for argument parsing. You can view all available options and defaults using the help flag:
+
+```bash
+python src/main.py -h
+```
+
+**Common Examples:**
+
+```bash
+# Run with default settings (KITTI sequence 05, Rerun visualization)
+python src/main.py
+
+# Run with cv2 visualization instead of Rerun
+python src/main.py --cv2_viz
+
+# Run on a different dataset
+python src/main.py --dataset parking
+
+# Run KITTI with a specific sequence
+python src/main.py --dataset kitti --sequence 06
 ```
