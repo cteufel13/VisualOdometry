@@ -7,7 +7,9 @@ dependencies = [
     "opencv-python>=4.12.0.88",
     # uv add <package> will automatically add here
     "pre-commit>=4.4.0",
+    "pyceres>=2.6",
     "rerun-sdk>=0.27.2",
+    "scipy>=1.16.3",
     "tyro>=0.9.35",
 ]
 

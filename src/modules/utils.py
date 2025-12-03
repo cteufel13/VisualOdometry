@@ -61,7 +61,7 @@ def compute_trajectory_length(trajectory: list[VOState]) -> float:
 
 def save_trajectory(trajectory: list[VOState], filename: str) -> None:
     """
-    Save trajectory to file in TUM format (timestamp tx ty tz qx qy qz qw).
+    Save trajectory to file in TUM format ( tx ty tz qx qy qz qw).
 
     Args:
         trajectory: List of VOState objects
