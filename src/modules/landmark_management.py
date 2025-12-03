@@ -1,4 +1,6 @@
 import numpy as np
+import pyceres
+from scipy.spatial.transform import Rotation
 
 from state.landmark_database import LandmarkDatabase
 from state.vo_state import VOState
@@ -11,7 +13,7 @@ def update_landmark_database(
     inlier_mask: np.ndarray,
     matched_landmark_indices: np.ndarray,
     new_keypoints_curr: np.ndarray | None,
-    new_descriptors_curr: np.ndarra | None,
+    new_descriptors_curr: np.ndarray | None,
     new_keypoints_prev: np.ndarray | None,
     K: np.ndarray,
 ) -> LandmarkDatabase:
@@ -126,6 +128,7 @@ def compute_triangulation_quality(
     t1: np.ndarray,
     R2: np.ndarray,
     t2: np.ndarray,
+    K: np.ndarray,
 ) -> np.ndarray:
     """
     Compute quality metric for triangulated points.
@@ -166,3 +169,5 @@ def update_observation_counts(
 
     """
     pass
+
+

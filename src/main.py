@@ -14,8 +14,11 @@ from modules.dataset_loader import (
     OwnDataset,
     ParkingDataset,
 )
+from modules.feature_matching import extract_and_match_features
 from modules.initialization import initialize_vo
-from modules.utils import create_camera_matrix, create_empty_landmark_database
+from modules.landmark_management import update_landmark_database
+from modules.state_estimation import estimate_pose_pnp
+from modules.utils import create_empty_landmark_database
 from state.landmark_database import LandmarkDatabase
 from state.vo_state import VOState
 
@@ -28,11 +31,11 @@ def init_rerun() -> None:
 
 
 def log_frame_rerun(
-    image: np.ndarray,
-    T_cw: np.ndarray,
+    vo_state: VOState,
     K: np.ndarray,
     frame_id: int,
-    landmarks: np.ndarray | None = None,
+    lm_db: LandmarkDatabase,
+    # matched_track_ids: np.ndarray,
 ) -> None:
     """
     Log data to Rerun.
@@ -45,6 +48,10 @@ def log_frame_rerun(
         landmarks: Optional 3D points (N, 3).
 
     """
+
+    image = vo_state.img
+    T_cw = vo_state.get_homogenous_tf()
+
     rr.set_time_sequence("frame_idx", frame_id)
 
     # we need to convert T_cw (world -> camera) to T_wc (camera -> world).
@@ -66,46 +73,66 @@ def log_frame_rerun(
     # log image
     rr.log("world/camera/image", rr.Image(image))
 
+    matched_track_ids = vo_state.matched_track_ids
     # log landmarks
-    if landmarks is not None and len(landmarks) > 0:
-        rr.log("world/landmarks", rr.Points3D(landmarks, colors=[255, 255, 255]))
+    matched_mask = np.isin(lm_db.track_ids, matched_track_ids)
+    rr.log(
+        "world/matched_landmarks",
+        rr.Points3D(lm_db.landmarks_3d[matched_mask], colors=[0, 255, 0]),
+    )
+    rr.log(
+        "world/unmatched_landmarks",
+        rr.Points3D(lm_db.landmarks_3d[~matched_mask], colors=[255, 0, 0]),
+    )
 
+    camera_projected_matched, _ = cv2.projectPoints(
+        lm_db.landmarks_3d[matched_mask],
+        rvec=R_wc,
+        tvec=t_wc,
+        cameraMatrix=K,
+        distCoeffs=np.zeros(4),
+    )
+    assert len(camera_projected_matched) == len(
+        vo_state.matched_keypoints_2d
+    ), f"image: {frame_id},len 1 = {len(camera_projected_matched)}, len 2 = {len(
+        vo_state.matched_keypoints_2d
+    )} "
 
-def process_first_two_frames(
-    img1: np.ndarray,
-    img2: np.ndarray,
-    K: np.ndarray,
-    timestamp1: float = 0.0,
-    timestamp2: float = 0.0,
-) -> tuple[VOState, LandmarkDatabase, bool]:
-    """
-    Initialize the VO pipeline from first two frames.
+    camera_projected_matched = camera_projected_matched.reshape(-1, 2)
 
-    This is a convenience wrapper around initialize_vo.
+    # camera_projected_unmatched = cv2.projectPoints(
+    #     lm_db.landmarks_3d[~matched_mask],
+    #     rvec=R_wc,
+    #     tvec=t_wc,
+    #     cameraMatrix=K,
+    #     distCoeffs=np.zeros(4),
+    # )
 
-    Args:
-        img1: First image
-        img2: Second image
-        K: 3x3 camera calibration matrix
-        timestamp1: Timestamp of first image
-        timestamp2: Timestamp of second image
-
-    Returns:
-        vo_state: Initial VOState
-        landmark_db: Initial LandmarkDatabase
-        success: True if successful
-
-    """
-    return initialize_vo(img1, img2, K, timestamp1, timestamp2)
+    assert len(camera_projected_matched) == len(vo_state.matched_keypoints_2d)
+    # Log as 2D points overlaid on image
+    rr.log(
+        "world/camera/image/feature1",
+        rr.Points2D(
+            camera_projected_matched,
+            colors=[[0, 255, 0] for _ in range(len(camera_projected_matched))],
+            radii=3.0,
+        ),
+    )
+    rr.log(
+        "world/camera/image/feature2",
+        rr.Points2D(
+            vo_state.matched_keypoints_2d,
+            colors=[[0, 0, 255] for _ in range(len(camera_projected_matched))],
+            radii=3.0,
+        ),
+    )
 
 
 def process_frame(
     img: np.ndarray,
-    vo_state: VOState,
     vo_state_prev: VOState,
     landmark_db: LandmarkDatabase,
     K: np.ndarray,
-    timestamp: float,
     next_track_id: int,
 ) -> tuple[VOState, LandmarkDatabase, bool, int]:
     """
@@ -119,11 +146,9 @@ def process_frame(
 
     Args:
         img: New input image
-        vo_state: Current VO state
         vo_state_prev: Previous VO state (for triangulation)
         landmark_db: Current landmark database
         K: 3x3 camera calibration matrix
-        timestamp: Timestamp of current frame
         next_track_id: Next available track ID for new landmarks
 
     Returns:
@@ -133,12 +158,29 @@ def process_frame(
         next_track_id: Updated next track ID
 
     """
-    pass
+    points_2d, points_3d, landmark_indices = extract_and_match_features(
+        img, landmark_db=landmark_db
+    )
+    new_R, new_t, inlier_mask, _ = estimate_pose_pnp(
+        points_3d=points_3d, points_2d=points_2d, K=K
+    )
+    new_state = VOState(
+        R=new_R,
+        t=new_t,
+        frame_id=vo_state_prev.frame_id + 1,
+        img=img,
+        matched_track_ids=landmark_db.track_ids[landmark_indices[inlier_mask]],
+        matched_keypoints_2d=points_2d[inlier_mask],
+    )
+
+    # no new landmarks for first iteration
+    # questions for next_track_id
+
+    return new_state, landmark_db, True, 0
 
 
 def run_vo_pipeline(
     images: list[np.ndarray],
-    timestamps: list[float],
     K: np.ndarray,
 ) -> tuple[list[VOState], LandmarkDatabase]:
     """
@@ -146,7 +188,6 @@ def run_vo_pipeline(
 
     Args:
         images: List of images
-        timestamps: List of timestamps
         K: 3x3 camera calibration matrix
 
     Returns:
@@ -159,32 +200,61 @@ def run_vo_pipeline(
         return [], None
 
     # Initialize from first two frames
-    vo_state, landmark_db, success = process_first_two_frames(
-        images[0],
-        images[1],
-        K,
-        timestamps[0],
-        timestamps[1],
+    first_image = images.pop(0)
+
+    # Initialize VO with timeout
+    max_initialization_attempts = min(10, len(images))  # Prevent infinite loop
+    initialization_successful = False
+
+    second_vo_state = VOState(
+        np.eye(3),
+        np.zeros(3),
+        0,
+        img=first_image,
+        matched_track_ids=[],
+        matched_keypoints_2d=[],
     )
 
-    if not success:
-        print("Initialization failed")
-        return [], None
+    for _ in range(max_initialization_attempts):
+        if len(images) == 0:
+            raise RuntimeError("Ran out of images before successful VO initialization")
 
-    trajectory = [vo_state]
+        current_image = images.pop(0)
+        second_vo_state, landmark_db, initialization_successful = initialize_vo(
+            first_image, current_image, K
+        )
+
+        if initialization_successful:
+            break
+
+    if not initialization_successful:
+        raise RuntimeError(
+            f"Failed to initialize VO after {max_initialization_attempts} attempts"
+        )
+
+    # Initialize trajectory
+    trajectory = [
+        VOState(
+            np.eye(3),
+            np.zeros(3),
+            0,
+            img=first_image,
+            matched_track_ids=landmark_db.track_ids,
+            matched_keypoints_2d=second_vo_state.matched_keypoints_2d,
+        ),
+        second_vo_state,
+    ]
+
     next_track_id = len(landmark_db.track_ids)
 
+    current_vo_state = second_vo_state
     # Process remaining frames
     for i in range(2, len(images)):
-        vo_state_prev = trajectory[-1]
-
-        vo_state, landmark_db, success, next_track_id = process_frame(
+        current_vo_state, landmark_db, success, next_track_id = process_frame(
             images[i],
-            vo_state,
-            vo_state_prev,
+            current_vo_state,
             landmark_db,
             K,
-            timestamps[i],
             next_track_id,
         )
 
@@ -192,7 +262,7 @@ def run_vo_pipeline(
             print(f"Frame {i} failed")
             break
 
-        trajectory.append(vo_state)
+        trajectory.append(current_vo_state)
 
         if i % 10 == 0:
             print(
@@ -201,11 +271,6 @@ def run_vo_pipeline(
             )
 
     return trajectory, landmark_db
-
-
-# ============================================================================
-# Example Usage
-# ============================================================================
 
 
 @dataclass
@@ -227,7 +292,7 @@ class Args:
 
 def main(args: Args) -> None:
     """Run main function."""
-    # 1. Initialize Dataset
+    # Initialize Dataset
     print(f"Initializing {args.dataset} dataset from {args.path}...")
 
     loader: BaseDataset
@@ -247,56 +312,32 @@ def main(args: Args) -> None:
     print(f"Loaded {len(loader.image_files)} images.")
     print(f"Camera Matrix K:\n{loader.K}\n")
 
-    # 2. Initialize Rerun if requested
+    # Initialize Rerun if requested
     if not args.cv2_viz:
         init_rerun()
 
-    # 3. Dummy Loop (Plays back images)
-    print("Starting processing loop...")
+    images = [
+        cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        for img_path in loader.image_files
+    ]
+    K = loader.K
+    trajectory, lm_db = run_vo_pipeline(images, K)
 
-    # Placeholder for the actual VO pipeline state
-    # vo_state = VOState(...)
-
-    for i, img_path in enumerate(loader.image_files):
-        # Read image
-        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            continue
-
-        # --- TODO: INSERT VO PIPELINE HERE ---
-        # T_cw = vo.process(img, i)
-
-        # For now, we use a dummy identity pose just to make the visualizer work
-        T_cw = np.eye(4)
-        # -------------------------------------
-
-        # Visualization
+    for i, (vo_state) in enumerate(trajectory):
         if args.cv2_viz:
-            # Standard OpenCV window
-            cv2.imshow("VO Skeleton", img)
-            cv2.setWindowTitle("VO Skeleton", f"Frame {i} - {args.dataset}")
+            cv2.imshow("VO Skeleton", vo_state.img)
             if cv2.waitKey(1) == 27:  # ESC to stop
                 break
         else:
-            log_frame_rerun(img, T_cw, loader.K, i)
+            log_frame_rerun(
+                vo_state,
+                loader.K,
+                i,
+                lm_db,
+            )
 
     cv2.destroyAllWindows()
     print("\nDone! Skeleton loop finished.")
-
-    empty_db = create_empty_landmark_database()
-    print(f"Empty database created with {len(empty_db.landmarks_3d)} landmarks\n")
-
-    # what to implement next
-    print("Monocular VO functional skeleton ready!")
-    print("\nMain functions to implement:")
-    print("  - detect_keypoints_and_descriptors()")
-    print("  - match_descriptors()")
-    print("  - estimate_pose_2d_to_2d()")
-    print("  - triangulate_points()")
-    print("  - estimate_pose_pnp()")
-    print("  - pnp_ransac()")
-    print("  - p3p()")
-    print("  - update_landmark_database()")
 
 
 if __name__ == "__main__":
