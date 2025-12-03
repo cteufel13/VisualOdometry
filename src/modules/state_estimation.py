@@ -1,7 +1,7 @@
-import numpy as np
 import cv2
-from config.config import RANSAC_PROB, RANSAC_THRESH
-from state.vo_state import VOState
+import numpy as np
+
+from config import config
 
 
 def estimate_pose_pnp(
@@ -28,6 +28,9 @@ def estimate_pose_pnp(
         inlier_mask: (N,) boolean array indicating inliers
         reprojection_error: mean reprojection error of inliers (pixels)
 
+    Raises:
+        ValueError: If fewer than 4 point correspondences are provided
+
     """
     # Ensure inputs are contiguous and correct dtype
     points_3d = np.ascontiguousarray(points_3d, dtype=np.float64)
@@ -37,7 +40,13 @@ def estimate_pose_pnp(
     # Extract camera intrinsics for cv2.solvePnPRansac
     # OpenCV expects distortion coefficients (use none for calibrated cameras)
     dist_coeffs = np.zeros(4)
-    assert len(points_3d) >= 4
+
+    if len(points_3d) < 4:
+        error_msg = (
+            f"PnP requires at least 4 point correspondences, got {len(points_3d)}"
+        )
+        raise ValueError(error_msg)
+
     # Step 1: Run P3P-RANSAC to find inliers and initial pose
     success, rvec_ransac, tvec_ransac, inliers = cv2.solvePnPRansac(
         objectPoints=points_3d,
@@ -45,8 +54,8 @@ def estimate_pose_pnp(
         cameraMatrix=K,
         distCoeffs=dist_coeffs,
         iterationsCount=100,
-        reprojectionError=RANSAC_THRESH,  # RANSAC threshold in pixels
-        confidence=RANSAC_PROB,
+        reprojectionError=config.RANSAC_THRESH_PIXELS,  # RANSAC threshold in pixels
+        confidence=config.RANSAC_PROB,
         flags=cv2.SOLVEPNP_P3P,
     )
 
@@ -107,6 +116,7 @@ def refine_pose_pnp(
     Returns:
         R: 3x3 refined rotation matrix
         t: 3x1 refined translation vector
+
     """
     # Ensure inputs are contiguous and correct dtype
     points_3d = np.ascontiguousarray(points_3d, dtype=np.float64)
@@ -162,6 +172,7 @@ def compute_reprojection_error(
 
     Returns:
         mean_error: mean L2 reprojection error in pixels
+
     """
     # Ensure inputs are contiguous and correct dtype
     points_3d = np.ascontiguousarray(points_3d, dtype=np.float64)
@@ -187,6 +198,5 @@ def compute_reprojection_error(
 
     # Compute L2 distance in pixels
     errors = np.linalg.norm(points_2d - projected_points, axis=1)
-    mean_error = np.mean(errors)
 
-    return mean_error
+    return np.mean(errors)

@@ -1,14 +1,14 @@
 import cv2
 import numpy as np
 
-from config.config import KEYFRAME_RATIO_THRESH, RANSAC_PROB, RANSAC_THRESH
-from modules.feature_matching import detect_keypoints_and_descriptors, match_descriptors
+from config import config
 from modules.bundle_adjustment import bundle_adjustment_ceres
+from modules.feature_matching import detect_keypoints_and_descriptors, match_descriptors
 from state.landmark_database import LandmarkDatabase
 from state.vo_state import VOState
 
 
-def initialize_vo(
+def initialize_vo_from_two_frames(
     img1: np.ndarray,
     img2: np.ndarray,
     K: np.ndarray,
@@ -48,7 +48,7 @@ def initialize_vo(
     )
 
     keyframe_ratio = np.linalg.norm(t) / np.median(points_3d[:, 2])
-    if keyframe_ratio > KEYFRAME_RATIO_THRESH:
+    if keyframe_ratio > config.KEYFRAME_RATIO_THRESH:
         return None, None, False
 
     # Prepare observations
@@ -115,8 +115,8 @@ def estimate_pose_2d_to_2d(
         kpts2,
         K,
         method=cv2.RANSAC,
-        prob=RANSAC_PROB,  # Confidence that at least one sample is outlier-free
-        threshold=RANSAC_THRESH,  # Max reprojection error in pixels for inlier
+        prob=config.RANSAC_PROB,  # Confidence that at least one sample is outlier-free
+        threshold=config.RANSAC_THRESH_PIXELS,  # Max reprojection error in pixels for inlier
     )
 
     # Convert mask to boolean array
