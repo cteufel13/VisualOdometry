@@ -7,6 +7,7 @@ import numpy as np
 import rerun as rr
 import tyro
 
+from modules.bundle_adjustment import bundle_adjustment_sw
 from modules.dataset_loader import (
     BaseDataset,
     KittiDataset,
@@ -313,6 +314,10 @@ def run_vo_pipeline(
     current_vo_state = trajectory[-1]  # Get the last (second) state
     last_kf_state = current_vo_state
 
+    # Sliding window buffer for bundle adjustment
+    BA_WINDOW_SIZE = 30
+    vo_state_buffer = list(trajectory)  # Start with initialization frames
+
     # Process remaining frames with incremental logging
     for i, image in enumerate(remaining_images):
         frame_idx = i + 2  # Account for the two initialization frames
@@ -326,6 +331,30 @@ def run_vo_pipeline(
         )
 
         trajectory.append(current_vo_state)
+
+        # Add current state to sliding window buffer
+        vo_state_buffer.append(current_vo_state)
+
+        # Maintain sliding window size
+        if len(vo_state_buffer) > BA_WINDOW_SIZE:
+            vo_state_buffer.pop(0)
+
+        # Run bundle adjustment every frame
+        landmark_db, updated_vo_buffer = bundle_adjustment_sw(
+            vo_state_buffer, landmark_db, K
+        )
+
+        # Update the sliding window buffer with refined poses
+        vo_state_buffer = updated_vo_buffer
+
+        # Update trajectory with refined poses from BA
+        # The last len(vo_state_buffer) poses in trajectory should match the buffer
+        start_idx = len(trajectory) - len(vo_state_buffer)
+        for j, refined_vo_state in enumerate(vo_state_buffer):
+            trajectory[start_idx + j] = refined_vo_state
+
+        # Update current state reference
+        current_vo_state = trajectory[-1]
 
         # Log immediately after successful processing
         if cv2_viz:

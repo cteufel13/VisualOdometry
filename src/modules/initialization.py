@@ -68,7 +68,11 @@ def initialize_vo_from_two_frames(
         return None, None, False
 
     # Prepare observations
+
+    track_ids = np.arange(len(inlier_kp1))
     observations = [inlier_kp1, inlier_kp2]
+    observations = [[(track_ids[i],inlier_kp1[i]) for i in range(len(inlier_kp1))], [(track_ids[i],inlier_kp2[i]) for i in range(len(inlier_kp2))]]
+
 
     # Bundle adjustment
     camera_poses = [(np.eye(3), np.zeros(3)), (R, t)]
