@@ -20,9 +20,10 @@ from modules.initialization import initialize_vo_from_two_frames
 from modules.landmark_management import update_landmark_database
 from modules.state_estimation import estimate_pose_pnp
 from modules.utils import get_homogeneous_transform
+from modules.bundle_adjustment import bundle_adjustment_sw
 from state.landmark_database import LandmarkDatabase
 from state.vo_state import VOState
-from config.config import MAX_LAST_SEEN_FRAMES
+from config.config import MAX_LAST_SEEN_FRAMES,BA_ON,BA_FRAMES,BA_INTERVAL,FRAME_CAPTURE_INTERVAL
 
 
 def init_rerun() -> None:
@@ -211,6 +212,8 @@ def initialize_vo(
 
     landmark_db = None
 
+    images = images[8:]
+
     for _ in range(max_initialization_attempts):
         if len(images) == 0:
             error_msg = "Ran out of images before successful VO initialization"
@@ -341,32 +344,35 @@ def run_vo_pipeline(
     for i, image in enumerate(remaining_images):
         frame_idx = i + 2  # Account for the two initialization frames
 
-        current_vo_state, landmark_db, last_kf_state, next_track_id = process_frame(
-            image,
-            last_kf_state,
-            landmark_db,
-            K,
-            next_track_id,
-        )
-
-        vo_state_queue.append(current_vo_state)
-
-        trajectory.append(current_vo_state)
-
-        # Log immediately after successful processing
-        if cv2_viz:
-            cv2.imshow("VO Skeleton", current_vo_state.img)
-            if cv2.waitKey(1) == 27:  # ESC to stop
-                print(f"Stopped by user at frame {frame_idx}")
-                break
-        else:
-            log_frame_rerun(current_vo_state, K, frame_idx, landmark_db, trajectory)
-
-        if frame_idx % 10 == 0:
-            print(
-                f"Processed frame {frame_idx}/{len(remaining_images) + 2}, "
-                f"{len(landmark_db.landmarks_3d)} landmarks",
+        if i % FRAME_CAPTURE_INTERVAL == 0:
+            current_vo_state, landmark_db, last_kf_state, next_track_id = process_frame(
+                image,
+                last_kf_state,
+                landmark_db,
+                K,
+                next_track_id,
             )
+
+            vo_state_queue.append(current_vo_state)
+            trajectory.append(current_vo_state)
+
+            if len(vo_state_queue) >= 15 and BA_INTERVAL:
+                landmark_db, trajectory[-BA_FRAMES:] = bundle_adjustment_sw(vo_state_buffer=vo_state_queue,landmark_db=landmark_db,K=K)
+
+            # Log immediately after successful processing
+            if cv2_viz:
+                cv2.imshow("VO Skeleton", current_vo_state.img)
+                if cv2.waitKey(1) == 27:  # ESC to stop
+                    print(f"Stopped by user at frame {frame_idx}")
+                    break
+            else:
+                log_frame_rerun(current_vo_state, K, frame_idx, landmark_db, trajectory)
+
+            if frame_idx % 10 == 0:
+                print(
+                    f"Processed frame {frame_idx}/{len(remaining_images) + 2}, "
+                    f"{len(landmark_db.landmarks_3d)} landmarks",
+                )
 
     return trajectory, landmark_db
 
@@ -425,6 +431,33 @@ def main(args: Args) -> None:
 
     if args.cv2_viz:
         cv2.destroyAllWindows()
+    else:
+        # --- NEW: Log final optimized trajectory in RED ---
+        print("\nLogging final optimized trajectory to Rerun in Red...")
+        
+        final_camera_positions = []
+        for state in trajectory:
+            T_cw = get_homogeneous_transform(state)
+            R_cw = T_cw[:3, :3]
+            t_cw = T_cw[:3, 3]
+
+            # Convert to world frame: T_wc = T_cw^-1
+            R_wc = R_cw.T
+            t_wc = -R_wc @ t_cw
+            
+            final_camera_positions.append(t_wc)
+
+        if final_camera_positions:
+            rr.log(
+                "world/final_optimized_trajectory",
+                rr.LineStrips3D(
+                    np.array(final_camera_positions),
+                    colors=[255, 0, 0],  # Red color
+                    radii=0.2,           # Slightly thicker to stand out
+                    labels="Final Optimized Path"
+                )
+            )
+        # --------------------------------------------------
 
     print(f"\nDone! Processed {len(trajectory)} frames successfully.")
     print(f"Final landmark database contains {len(lm_db.landmarks_3d)} landmarks.")
