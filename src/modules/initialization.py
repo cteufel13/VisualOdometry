@@ -47,13 +47,25 @@ def initialize_vo_from_two_frames(
         kp1[idx1][inliers], kp2[idx2][inliers], np.eye(3), np.zeros(3), R, t, K
     )
 
+    # Filter points based on depth (in camera 1 frame, which is world frame here)
+    depths = points_3d[:, 2]
+    valid_depth_mask = (depths > config.MIN_PARALLAX) & (depths < config.MAX_DEPTH)
+
+    # Return failure if too few valid points
+    if np.sum(valid_depth_mask) < 8:
+        return None, None, False
+
+    # Keep only valid points
+    points_3d = points_3d[valid_depth_mask]
+    inlier_kp1 = kp1[idx1][inliers][valid_depth_mask]
+    inlier_kp2 = kp2[idx2][inliers][valid_depth_mask]
+    valid_descriptors = d1[idx1][inliers][valid_depth_mask]
+
     keyframe_ratio = np.linalg.norm(t) / np.median(points_3d[:, 2])
     if keyframe_ratio > config.KEYFRAME_RATIO_THRESH:
         return None, None, False
 
     # Prepare observations
-    inlier_kp1 = kp1[idx1][inliers]
-    inlier_kp2 = kp2[idx2][inliers]
     observations = [inlier_kp1, inlier_kp2]
 
     # Bundle adjustment
@@ -74,7 +86,7 @@ def initialize_vo_from_two_frames(
         ),
         LandmarkDatabase(
             points_3d_refined,
-            d1[idx1][inliers],
+            valid_descriptors,
             np.arange(points_3d_refined.shape[0]),
             np.ones(points_3d_refined.shape[0]),
         ),
