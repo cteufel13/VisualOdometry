@@ -156,8 +156,8 @@ def update_observation_counts(
 
 def filter_landmarks(
     landmark_db: LandmarkDatabase,
-    vo_state: VOState | None = None,
-    K: np.ndarray | None = None,
+    vo_state: VOState | None = None,  # noqa: ARG001
+    K: np.ndarray | None = None,  # noqa: ARG001
 ) -> LandmarkDatabase:
     """
     Remove low-quality landmarks from database.
@@ -232,14 +232,14 @@ def validate_and_filter_new_landmarks(
     descriptors: np.ndarray,
     vo_state: VOState,
     last_keyframe_vo_state: VOState,
-    landmark_db: LandmarkDatabase,  # noqa: ARG001 - used in commented scale check
+    landmark_db: LandmarkDatabase,
     K: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """
     Consolidated validation and filtering of newly triangulated landmarks.
 
     Performs all quality checks in one place:
-    1. Depth constraints (MIN_PARALLAX < depth < MAX_DEPTH)
+    1. Depth constraints (MIN_TRIANGULATION_DEPTH < depth < MAX_TRIANGULATION_DEPTH)
     2. Reprojection error validation
     3. Soft scale consistency check with existing landmarks
 
@@ -266,6 +266,9 @@ def validate_and_filter_new_landmarks(
     """
     # 1. Filter by depth constraints
     depth_valid_mask = filter_triangulated_points(points_3d, vo_state.R, vo_state.t)
+
+    if len(points_3d[depth_valid_mask]) == 0:
+        return np.empty((0, 3)), np.empty((0, descriptors.shape[1])), 0.0
 
     # 2. Filter by reprojection error (only check depth-valid points)
     reproj_valid_mask = validate_reprojection_error(
@@ -299,35 +302,35 @@ def validate_and_filter_new_landmarks(
 
     # 3. Soft scale consistency check with existing landmarks
     # This handles scenes where depth changes rapidly (close -> far or vice versa)
-    # if len(landmark_db.landmarks_3d) > 0:
-    #     existing_depths_cam = transform_to_camera_frame(
-    #         landmark_db.landmarks_3d, vo_state.R, vo_state.t
-    #     )[:, 2]
-    #     median_existing_depth = np.median(existing_depths_cam[existing_depths_cam > 0])
+    if len(landmark_db.landmarks_3d) > 0:
+        existing_depths_cam = transform_to_camera_frame(
+            landmark_db.landmarks_3d, vo_state.R, vo_state.t
+        )[:, 2]
+        median_existing_depth = np.median(existing_depths_cam[existing_depths_cam > 0])
 
-    #     scale_ratio = median_depth / median_existing_depth
+        scale_ratio = median_depth / median_existing_depth
 
-    #     # If scale change is large, check if it's a legitimate scene transition
-    #     # or bad triangulation by examining depth concentration
-    #     if scale_ratio < 0.5 or scale_ratio > 2.0:
-    #         # Calculate how concentrated the new landmark depths are
-    #         # Low variance = consistent depth = likely real scene transition
-    #         # High variance = scattered depth = likely bad triangulation
-    #         new_depths = points_3d_cam[:, 2]
+        # If scale change is large, check if it's a legitimate scene transition
+        # or bad triangulation by examining depth concentration
+        if scale_ratio < 0.5 or scale_ratio > 2.0:
+            # Calculate how concentrated the new landmark depths are
+            # Low variance = consistent depth = likely real scene transition
+            # High variance = scattered depth = likely bad triangulation
+            new_depths = points_3d_cam[:, 2]
 
-    #         # Use Median Absolute Deviation (MAD) normalized by median for robustness
-    #         mad = np.median(np.abs(new_depths - median_depth))
-    #         normalized_spread = mad / median_depth if median_depth > 0 else float('inf')
+            # Use Median Absolute Deviation (MAD) normalized by median for robustness
+            mad = np.median(np.abs(new_depths - median_depth))
+            normalized_spread = mad / median_depth if median_depth > 0 else float("inf")
 
-    #         # If depths are concentrated, accept the scale change
-    #         # This indicates many points agree on the depth -> legitimate scene transition
-    #         if normalized_spread > config.SCALE_CONSISTENCY_SPREAD_THRESHOLD:
-    #             # High spread with scale change = likely bad triangulation
-    #             # Reject all new landmarks
-    #             return np.empty((0, 3)), np.empty((0, descriptors.shape[1])), 0.0
+            # If depths are concentrated, accept the scale change
+            # This indicates many points agree on the depth -> legitimate scene transition
+            if normalized_spread > config.SCALE_CONSISTENCY_SPREAD_THRESHOLD:
+                # High spread with scale change = likely bad triangulation
+                # Reject all new landmarks
+                return np.empty((0, 3)), np.empty((0, descriptors.shape[1])), 0.0
 
-    #         # Otherwise: Low spread with scale change = accept as scene transition
-    #         # (e.g., camera moved from close features to far features)
+            # Otherwise: Low spread with scale change = accept as scene transition
+            # (e.g., camera moved from close features to far features)
 
     # TODO: Future improvement - directional scale validation
     # Consider camera motion direction and spatial distribution of scale changes.
@@ -358,9 +361,7 @@ def transform_to_camera_frame(
     t_cw = t_cw.reshape(3, 1)
 
     # Transform: P_cam = R_cw @ P_world + t_cw
-    points_3d_cam = (R_cw @ points_3d_world.T).T + t_cw.T
-
-    return points_3d_cam
+    return (R_cw @ points_3d_world.T).T + t_cw.T
 
 
 def filter_triangulated_points(
@@ -373,8 +374,8 @@ def filter_triangulated_points(
 
     Filters based on:
     1. Points behind the camera (depth < 0)
-    2. Points too close (depth < MIN_PARALLAX)
-    3. Points too far (depth > MAX_DEPTH)
+    2. Points too close (depth < MIN_TRIANGULATION_DEPTH)
+    3. Points too far (depth > MAX_TRIANGULATION_DEPTH)
 
     Args:
         points_3d: (N, 3) triangulated points in world coordinates
@@ -392,12 +393,10 @@ def filter_triangulated_points(
     depths = points_3d_cam[:, 2]
 
     # Filter based on depth constraints
-    valid_mask = (
-        (depths > config.MIN_PARALLAX)  # Not too close or behind camera
-        & (depths < config.MAX_DEPTH)  # Not too far
+    return (
+        (depths > config.MIN_TRIANGULATION_DEPTH)  # Not too close or behind camera
+        & (depths < config.MAX_TRIANGULATION_DEPTH)  # Not too far
     )
-
-    return valid_mask
 
 
 def validate_reprojection_error(
@@ -493,6 +492,4 @@ def filter_existing_landmarks(
     for idx in matched_indices:
         unmatched_mask[idx] = False
 
-    unmatched_indices = np.where(unmatched_mask)[0]
-
-    return unmatched_indices
+    return np.where(unmatched_mask)[0]

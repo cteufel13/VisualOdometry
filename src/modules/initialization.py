@@ -49,7 +49,9 @@ def initialize_vo_from_two_frames(
 
     # Filter points based on depth (in camera 1 frame, which is world frame here)
     depths = points_3d[:, 2]
-    valid_depth_mask = (depths > config.MIN_PARALLAX) & (depths < config.MAX_DEPTH)
+    valid_depth_mask = (depths > config.MIN_TRIANGULATION_DEPTH) & (
+        depths < config.MAX_TRIANGULATION_DEPTH
+    )
 
     # Return failure if too few valid points
     if np.sum(valid_depth_mask) < 8:
