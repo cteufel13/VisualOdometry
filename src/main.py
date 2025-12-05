@@ -1,13 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from collections import deque
 
 import cv2
 import numpy as np
 import rerun as rr
 import tyro
 
-from modules.bundle_adjustment import bundle_adjustment_sw
 from modules.dataset_loader import (
     BaseDataset,
     KittiDataset,
@@ -22,6 +22,7 @@ from modules.state_estimation import estimate_pose_pnp
 from modules.utils import get_homogeneous_transform
 from state.landmark_database import LandmarkDatabase
 from state.vo_state import VOState
+from config.config import MAX_LAST_SEEN_FRAMES
 
 
 def init_rerun() -> None:
@@ -36,6 +37,7 @@ def log_frame_rerun(
     K: np.ndarray,
     frame_id: int,
     lm_db: LandmarkDatabase,
+    trajectory: list[VOState] | None = None,
 ) -> None:
     """
     Log data to Rerun.
@@ -45,6 +47,7 @@ def log_frame_rerun(
         K: 3x3 camera intrinsic matrix
         frame_id: Frame index
         lm_db: Landmark database
+        trajectory: Optional list of all VOState objects for trajectory visualization
 
     Raises:
         ValueError: If number of projected points doesn't match number of keypoints
@@ -65,6 +68,24 @@ def log_frame_rerun(
 
     # Log camera pose in world frame
     rr.log("world/camera", rr.Transform3D(translation=t_wc, mat3x3=R_wc))
+
+    # Log trajectory line connecting all camera positions
+    if trajectory is not None and len(trajectory) > 1:
+        # Extract camera positions in world frame from all states in trajectory
+        camera_positions = []
+        for state in trajectory:
+            T_state = get_homogeneous_transform(state)
+            R_state = T_state[:3, :3]
+            t_state = T_state[:3, 3]
+            # Convert to world frame
+            t_wc_state = -R_state.T @ t_state
+            camera_positions.append(t_wc_state)
+
+        # Log as a line strip (trajectory path)
+        rr.log(
+            "world/trajectory",
+            rr.LineStrips3D(np.array(camera_positions), colors=[255, 255, 0]),  # Yellow line
+        )
 
     # Log pinhole camera model
     rr.log(
@@ -227,8 +248,8 @@ def initialize_vo(
         cv2.imshow("VO Skeleton", second_vo_state.img)
         cv2.waitKey(1)
     else:
-        log_frame_rerun(first_vo_state, K, 0, landmark_db)
-        log_frame_rerun(second_vo_state, K, 1, landmark_db)
+        log_frame_rerun(first_vo_state, K, 0, landmark_db, trajectory)
+        log_frame_rerun(second_vo_state, K, 1, landmark_db, trajectory)
 
     next_track_id = len(landmark_db.track_ids)
 
@@ -311,12 +332,10 @@ def run_vo_pipeline(
         images, K, cv2_viz=cv2_viz
     )
 
+    vo_state_queue = deque(maxlen=MAX_LAST_SEEN_FRAMES)
+
     current_vo_state = trajectory[-1]  # Get the last (second) state
     last_kf_state = current_vo_state
-
-    # Sliding window buffer for bundle adjustment
-    BA_WINDOW_SIZE = 30
-    vo_state_buffer = list(trajectory)  # Start with initialization frames
 
     # Process remaining frames with incremental logging
     for i, image in enumerate(remaining_images):
@@ -330,31 +349,9 @@ def run_vo_pipeline(
             next_track_id,
         )
 
+        vo_state_queue.append(current_vo_state)
+
         trajectory.append(current_vo_state)
-
-        # Add current state to sliding window buffer
-        vo_state_buffer.append(current_vo_state)
-
-        # Maintain sliding window size
-        if len(vo_state_buffer) > BA_WINDOW_SIZE:
-            vo_state_buffer.pop(0)
-
-        # Run bundle adjustment every frame
-        landmark_db, updated_vo_buffer = bundle_adjustment_sw(
-            vo_state_buffer, landmark_db, K
-        )
-
-        # Update the sliding window buffer with refined poses
-        vo_state_buffer = updated_vo_buffer
-
-        # Update trajectory with refined poses from BA
-        # The last len(vo_state_buffer) poses in trajectory should match the buffer
-        start_idx = len(trajectory) - len(vo_state_buffer)
-        for j, refined_vo_state in enumerate(vo_state_buffer):
-            trajectory[start_idx + j] = refined_vo_state
-
-        # Update current state reference
-        current_vo_state = trajectory[-1]
 
         # Log immediately after successful processing
         if cv2_viz:
@@ -363,7 +360,7 @@ def run_vo_pipeline(
                 print(f"Stopped by user at frame {frame_idx}")
                 break
         else:
-            log_frame_rerun(current_vo_state, K, frame_idx, landmark_db)
+            log_frame_rerun(current_vo_state, K, frame_idx, landmark_db, trajectory)
 
         if frame_idx % 10 == 0:
             print(
