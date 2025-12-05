@@ -14,6 +14,7 @@ LOWES_RATIO = 0.8
 MIN_FEATURES = 2000
 GRID_ROWS = 8
 GRID_COLS = 8
+FEATURES_PER_GRID_CELL = 10  # Max features to keep per grid cell
 MAX_POINT_LANDMARKS = 1000
 
 # Detector / Descriptor
@@ -21,14 +22,14 @@ DETECT_TYPE = DetectorType.FAST
 DESCRIPT_TYPE = DescriptorType.SIFT
 
 # FAST
-FAST_THRESH = 20
+FAST_THRESH = 10
 
 # SIFT
-SIFT_NFEATURES = 30
+SIFT_NFEATURES = 1000  # Increased from 30 to ensure enough features
 SIFT_NOCTAVES = 3
 SIFT_CONTRASTTHRESH = 0.04
 SIFT_EDGETHRESH = 10
-SIFT_SIGMA = 10
+SIFT_SIGMA = 1.6
 
 
 # KLT
@@ -44,7 +45,10 @@ RANSAC_THRESH_PIXELS = 5.0
 
 # Mapping
 MIN_PARALLAX = 1.0
-MAX_DEPTH = 500.0
+MAX_DEPTH = 100.0
 
 # Landmark Management
-MAX_LAST_SEEN_FRAMES = 20
+MAX_LAST_SEEN_FRAMES = 10
+MAX_REPROJECTION_ERROR_NEW_LANDMARKS = 3.0  # pixels
+MIN_LANDMARKS_FOR_TRACKING = 50  # Force keyframe if below this
+TARGET_LANDMARKS = 200  # Ideal number of landmarks to maintain

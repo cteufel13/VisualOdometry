@@ -3,12 +3,15 @@ import numpy as np
 
 from config import config
 from state.landmark_database import LandmarkDatabase
-from utils.enums import create_descriptor, create_detector, DescriptorType
+from utils.enums import DescriptorType, create_descriptor, create_detector
 
 
 def detect_keypoints_and_descriptors(img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
-    Detect keypoints and compute descriptors in image.
+    Detect keypoints and compute descriptors in image using grid-based detection.
+
+    Grid-based detection ensures features are distributed across the entire image
+    rather than clustering in high-texture areas.
 
     Args:
         img: Input grayscale image
@@ -24,11 +27,61 @@ def detect_keypoints_and_descriptors(img: np.ndarray) -> tuple[np.ndarray, np.nd
     # Feature Descriptor (Configurable)
     descriptor = create_descriptor(config.DESCRIPT_TYPE)
 
-    # Calculate keypoints and convert to np.ndarray when needed
-    keypoints = detector.detect(img)
-    _, descriptors = descriptor.compute(img, keypoints)
+    # Grid-based detection
+    height, width = img.shape
+    grid_rows = config.GRID_ROWS
+    grid_cols = config.GRID_COLS
+    features_per_cell = config.FEATURES_PER_GRID_CELL
 
-    keypoints_np = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+    # Calculate grid cell dimensions
+    cell_height = height // grid_rows
+    cell_width = width // grid_cols
+
+    all_keypoints = []
+
+    # Detect features in each grid cell
+    for row in range(grid_rows):
+        for col in range(grid_cols):
+            # Define cell boundaries
+            y_start = row * cell_height
+            y_end = (row + 1) * cell_height if row < grid_rows - 1 else height
+            x_start = col * cell_width
+            x_end = (col + 1) * cell_width if col < grid_cols - 1 else width
+
+            # Extract cell region
+            cell = img[y_start:y_end, x_start:x_end]
+
+            # Detect keypoints in this cell
+            cell_keypoints = detector.detect(cell)
+
+            # Convert to list and sort by response (feature strength), then keep top N
+            cell_keypoints = list(cell_keypoints)
+            cell_keypoints.sort(key=lambda kp: kp.response, reverse=True)
+            cell_keypoints = cell_keypoints[:features_per_cell]
+
+            # Convert cell coordinates to global image coordinates
+            for kp in cell_keypoints:
+                kp.pt = (kp.pt[0] + x_start, kp.pt[1] + y_start)
+                all_keypoints.append(kp)
+
+    # Return empty arrays if no keypoints detected
+    if len(all_keypoints) == 0:
+        return np.empty((0, 2), dtype=np.float32), np.empty((0, 128), dtype=np.float32)
+
+    # Compute descriptors for all selected keypoints
+    _, descriptors = descriptor.compute(img, all_keypoints)
+
+    # Filter out keypoints where descriptor computation failed
+    if descriptors is None or len(descriptors) == 0:
+        return np.empty((0, 2), dtype=np.float32), np.empty((0, 128), dtype=np.float32)
+
+    # Convert to numpy array
+    keypoints_np = np.array([kp.pt for kp in all_keypoints], dtype=np.float32)
+
+    # Ensure we only return keypoints that have valid descriptors
+    if len(keypoints_np) != len(descriptors):
+        # Some descriptors failed - only return ones with valid descriptors
+        keypoints_np = keypoints_np[: len(descriptors)]
 
     return keypoints_np, descriptors
 
@@ -128,7 +181,7 @@ def match_descriptors(
     db_matched = set()
     unique_matches = []
 
-    for query_idx, db_idx, distance in good_matches:
+    for query_idx, db_idx, _ in good_matches:
         if query_idx not in query_matched and db_idx not in db_matched:
             unique_matches.append([query_idx, db_idx])
             query_matched.add(query_idx)
