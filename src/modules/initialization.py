@@ -68,7 +68,6 @@ def initialize_vo_from_two_frames(
         VOState(
             R_refined,
             t_refined,
-            0,
             img2,
             np.arange(points_3d_refined.shape[0]),
             inlier_kp2,
