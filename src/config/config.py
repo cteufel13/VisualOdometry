@@ -17,7 +17,7 @@ GRID_COLS = 8
 MAX_POINT_LANDMARKS = 1000
 
 # Detector / Descriptor
-DETECT_TYPE = DetectorType.SIFT
+DETECT_TYPE = DetectorType.FAST
 DESCRIPT_TYPE = DescriptorType.SIFT
 
 # FAST
@@ -40,8 +40,11 @@ LK_PARAMS = {
 
 # Geometry
 RANSAC_PROB = 0.99
-RANSAC_THRESH_PIXELS = 10.0
+RANSAC_THRESH_PIXELS = 5.0
 
 # Mapping
 MIN_PARALLAX = 1.0
 MAX_DEPTH = 500.0
+
+# Landmark Management
+MAX_LAST_SEEN_FRAMES = 20

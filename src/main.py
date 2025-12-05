@@ -182,7 +182,6 @@ def initialize_vo(
     second_vo_state = VOState(
         np.eye(3),
         np.zeros(3),
-        0,
         img=first_image,
         matched_track_ids=[],
         matched_keypoints_2d=[],
@@ -213,7 +212,6 @@ def initialize_vo(
     first_vo_state = VOState(
         np.eye(3),
         np.zeros(3),
-        0,
         img=first_image,
         matched_track_ids=landmark_db.track_ids,
         matched_keypoints_2d=second_vo_state.matched_keypoints_2d,
@@ -238,7 +236,7 @@ def initialize_vo(
 
 def process_frame(
     img: np.ndarray,
-    vo_state_prev: VOState,
+    last_kf_state: VOState,
     landmark_db: LandmarkDatabase,
     K: np.ndarray,
     next_track_id: int,
@@ -272,19 +270,20 @@ def process_frame(
     new_R, new_t, inlier_mask, _ = estimate_pose_pnp(
         points_3d=points_3d, points_2d=points_2d, K=K
     )
+    inlier_lm_db_indices = landmark_indices[inlier_mask]
     new_state = VOState(
         R=new_R,
         t=new_t,
-        frame_id=vo_state_prev.frame_id + 1,
         img=img,
-        matched_track_ids=landmark_db.track_ids[landmark_indices[inlier_mask]],
+        matched_track_ids=landmark_db.track_ids[inlier_lm_db_indices],
         matched_keypoints_2d=points_2d[inlier_mask],
     )
 
-    # no new landmarks for first iteration
-    # questions for next_track_id
+    landmark_db, next_kf_state, next_track_id = update_landmark_database(
+        new_state, last_kf_state, landmark_db, inlier_lm_db_indices, next_track_id, K
+    )
 
-    return new_state, landmark_db, True, 0
+    return new_state, landmark_db, next_kf_state, next_track_id
 
 
 def run_vo_pipeline(
@@ -312,53 +311,36 @@ def run_vo_pipeline(
     )
 
     current_vo_state = trajectory[-1]  # Get the last (second) state
+    last_kf_state = current_vo_state
 
     # Process remaining frames with incremental logging
     for i, image in enumerate(remaining_images):
         frame_idx = i + 2  # Account for the two initialization frames
 
-        try:
-            current_vo_state, landmark_db, success, next_track_id = process_frame(
-                image,
-                current_vo_state,
-                landmark_db,
-                K,
-                next_track_id,
-            )
+        current_vo_state, landmark_db, last_kf_state, next_track_id = process_frame(
+            image,
+            last_kf_state,
+            landmark_db,
+            K,
+            next_track_id,
+        )
 
-            if not success:
-                print(f"Frame {frame_idx} failed - stopping processing")
+        trajectory.append(current_vo_state)
+
+        # Log immediately after successful processing
+        if cv2_viz:
+            cv2.imshow("VO Skeleton", current_vo_state.img)
+            if cv2.waitKey(1) == 27:  # ESC to stop
+                print(f"Stopped by user at frame {frame_idx}")
                 break
+        else:
+            log_frame_rerun(current_vo_state, K, frame_idx, landmark_db)
 
-            trajectory.append(current_vo_state)
-
-            # Log immediately after successful processing
-            if cv2_viz:
-                cv2.imshow("VO Skeleton", current_vo_state.img)
-                if cv2.waitKey(1) == 27:  # ESC to stop
-                    print(f"Stopped by user at frame {frame_idx}")
-                    break
-            else:
-                log_frame_rerun(current_vo_state, K, frame_idx, landmark_db)
-
-            if frame_idx % 10 == 0:
-                print(
-                    f"Processed frame {frame_idx}/{len(remaining_images) + 2}, "
-                    f"{len(landmark_db.landmarks_3d)} landmarks",
-                )
-
-        except (ValueError, cv2.error) as e:
-            print(f"Processing error at frame {frame_idx}: {e}")
+        if frame_idx % 10 == 0:
             print(
-                f"Stopping pipeline. Successfully processed {len(trajectory)} frames."
+                f"Processed frame {frame_idx}/{len(remaining_images) + 2}, "
+                f"{len(landmark_db.landmarks_3d)} landmarks",
             )
-            break
-        except KeyboardInterrupt:
-            print(f"\nInterrupted by user at frame {frame_idx}")
-            print(
-                f"Stopping pipeline. Successfully processed {len(trajectory)} frames."
-            )
-            break
 
     return trajectory, landmark_db
 

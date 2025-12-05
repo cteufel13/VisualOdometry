@@ -10,6 +10,6 @@ class LandmarkDatabase:
     landmarks_3d: np.ndarray  # (N, 3) array of 3D positions [X, Y, Z]
     descriptors: np.ndarray  # (N, D) array of feature descriptors
     track_ids: np.ndarray  # (N,) array of unique landmark IDs
-    num_observations: (
+    last_seen_n_frames_ago: (
         np.ndarray
-    )  # (N,) array tracking number of observations per landmark
+    )  # (N,) array containing when this feature was last matched
