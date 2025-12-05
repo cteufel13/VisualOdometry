@@ -54,72 +54,96 @@ def log_frame_rerun(
 
     rr.set_time_sequence("frame_idx", frame_id)
 
-    # we need to convert T_cw (world -> camera) to T_wc (camera -> world).
+    # Extract world -> camera transformation
     R_cw = T_cw[:3, :3]
     t_cw = T_cw[:3, 3]
 
+    # Convert to camera -> world for visualization
     R_wc = R_cw.T
     t_wc = -R_wc @ t_cw
 
-    # log camera in world frame
+    # Log camera pose in world frame
     rr.log("world/camera", rr.Transform3D(translation=t_wc, mat3x3=R_wc))
 
-    # log pinhole model
+    # Log pinhole camera model
     rr.log(
         "world/camera/image",
         rr.Pinhole(image_from_camera=K, width=image.shape[1], height=image.shape[0]),
     )
 
-    # log image
+    # Log the image
     rr.log("world/camera/image", rr.Image(image))
 
+    # Separate matched and unmatched landmarks
     matched_track_ids = vo_state.matched_track_ids
-    # log landmarks
     matched_mask = np.isin(lm_db.track_ids, matched_track_ids)
-    rr.log(
-        "world/matched_landmarks",
-        rr.Points3D(lm_db.landmarks_3d[matched_mask], colors=[0, 255, 0]),
-    )
-    rr.log(
-        "world/unmatched_landmarks",
-        rr.Points3D(lm_db.landmarks_3d[~matched_mask], colors=[255, 0, 0]),
-    )
 
-    camera_projected_matched, _ = cv2.projectPoints(
-        lm_db.landmarks_3d[matched_mask],
-        rvec=R_wc,
-        tvec=t_wc,
-        cameraMatrix=K,
-        distCoeffs=np.zeros(4),
-    )
-    camera_projected_matched = camera_projected_matched.reshape(-1, 2)
-
-    if len(camera_projected_matched) != len(vo_state.matched_keypoints_2d):
-        num_projected = len(camera_projected_matched)
-        num_keypoints = len(vo_state.matched_keypoints_2d)
-        error_msg = (
-            f"Mismatch at frame {frame_id}: "
-            f"{num_projected} projected points vs {num_keypoints} keypoints"
+    # Log 3D landmarks in world frame
+    if np.any(matched_mask):
+        rr.log(
+            "world/matched_landmarks",
+            rr.Points3D(lm_db.landmarks_3d[matched_mask], colors=[0, 255, 0]),
         )
-        raise ValueError(error_msg)
+    if np.any(~matched_mask):
+        rr.log(
+            "world/unmatched_landmarks",
+            rr.Points3D(lm_db.landmarks_3d[~matched_mask], colors=[255, 0, 0]),
+        )
 
-    # Log as 2D points overlaid on image
-    rr.log(
-        "world/camera/image/reprojected_matched_3d_points",
-        rr.Points2D(
-            camera_projected_matched,
-            colors=[0, 255, 0],
-            radii=3.0,
-        ),
-    )
-    rr.log(
-        "world/camera/image/matched_2d_keypoints",
-        rr.Points2D(
-            vo_state.matched_keypoints_2d,
-            colors=[0, 0, 255],
-            radii=3.0,
-        ),
-    )
+    # Project matched 3D landmarks to 2D image coordinates
+    # cv2.projectPoints expects world->camera transformation (extrinsic parameters)
+    if np.any(matched_mask):
+        rvec_cw, _ = cv2.Rodrigues(R_cw)  # Convert rotation matrix to Rodrigues vector
+
+        camera_projected_matched, _ = cv2.projectPoints(
+            lm_db.landmarks_3d[matched_mask],  # 3D points in world coordinates
+            rvec=rvec_cw,  # Rotation: world -> camera
+            tvec=t_cw,  # Translation: world -> camera
+            cameraMatrix=K,
+            distCoeffs=np.zeros(4),
+        )
+        camera_projected_matched = camera_projected_matched.reshape(-1, 2)
+
+        # Sanity check: number of projections should match number of matched keypoints
+        if len(camera_projected_matched) != len(vo_state.matched_keypoints_2d):
+            num_projected = len(camera_projected_matched)
+            num_keypoints = len(vo_state.matched_keypoints_2d)
+            error_msg = (
+                f"Mismatch at frame {frame_id}: "
+                f"{num_projected} projected points vs {num_keypoints} keypoints"
+            )
+            raise ValueError(error_msg)
+
+        # Log reprojected 3D points (green) - where landmarks should appear
+        rr.log(
+            "world/camera/image/reprojected_matched_3d_points",
+            rr.Points2D(
+                camera_projected_matched,
+                colors=[0, 255, 0],  # Green
+                radii=3.0,
+            ),
+        )
+
+        # Log actual detected 2D keypoints (blue) - where we actually detected them
+        rr.log(
+            "world/camera/image/matched_2d_keypoints",
+            rr.Points2D(
+                vo_state.matched_keypoints_2d,
+                colors=[0, 0, 255],  # Blue
+                radii=3.0,
+            ),
+        )
+
+        # Calculate and log reprojection error statistics
+        reprojection_errors = np.linalg.norm(
+            camera_projected_matched - vo_state.matched_keypoints_2d, axis=1
+        )
+        mean_error = np.mean(reprojection_errors)
+        max_error = np.max(reprojection_errors)
+
+        rr.log("stats/mean_reprojection_error", rr.Scalars(mean_error))
+        rr.log("stats/max_reprojection_error", rr.Scalars(max_error))
+        rr.log("stats/num_matched_landmarks", rr.Scalars(len(matched_track_ids)))
 
 
 def initialize_vo(
@@ -144,7 +168,6 @@ def initialize_vo(
         next_track_id: Next available track ID for new landmarks
 
     """
-    
     if len(images) < 2:
         error_msg = "Need at least 2 images for initialization"
         raise ValueError(error_msg)
