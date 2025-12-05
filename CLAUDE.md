@@ -144,8 +144,8 @@ All tunable parameters are in `config/config.py`:
 
 **Geometry**:
 - `RANSAC_PROB`, `RANSAC_THRESH_PIXELS`: RANSAC parameters
-- `MIN_PARALLAX`: Minimum depth for valid triangulation (meters)
-- `MAX_DEPTH`: Maximum depth for valid landmarks (meters)
+- `MIN_TRIANGULATION_DEPTH`: Minimum depth for valid triangulation (meters)
+- `MAX_TRIANGULATION_DEPTH`: Maximum depth for valid landmarks (meters)
 
 The system uses enums (`utils/enums.py`) for detector/descriptor type selection.
 
@@ -176,10 +176,21 @@ Uses **FAST detector with SIFT descriptors** in a grid-based approach:
 - Matches are sorted by distance before greedy unique selection
 - Duplicate prevention: New features matched against database to avoid re-triangulating existing landmarks
 
+### Triangulation and Depth Filtering
+
+The pipeline uses **linear triangulation (DLT)** via SVD (`modules/initialization.py:148-212`), which minimizes algebraic error but doesn't enforce geometric constraints. This means triangulated points can end up behind the camera due to:
+
+1. **Noise amplification**: Small pixel-level errors in 2D keypoints get amplified in 3D
+2. **Outlier matches**: Some incorrect matches pass RANSAC within the pixel threshold
+3. **Degenerate geometry**: Small baselines, distant points, or near-epipolar configurations
+4. **Unconstrained optimization**: Linear DLT finds the least-squares solution without "points must be in front" constraint
+
+**Why depth filtering is essential**: The depth checks at `landmark_management.py:396-398` remove physically impossible points (behind camera) and unreliable points (too close/far). These filters validate triangulation quality and prevent downstream errors in PnP pose estimation.
+
 ### Landmark Management & Quality Filtering
 
 **Consolidated Validation** (`validate_and_filter_new_landmarks`):
-1. **Depth filtering**: Rejects points behind camera or outside [MIN_PARALLAX, MAX_DEPTH]
+1. **Depth filtering**: Rejects points behind camera or outside [MIN_TRIANGULATION_DEPTH, MAX_TRIANGULATION_DEPTH]
 2. **Reprojection error**: Validates triangulation quality in both views (< 3 pixels)
 3. **Scale consistency**: Currently disabled - can be enabled for scenes with consistent depth
 
@@ -200,7 +211,7 @@ Uses **FAST detector with SIFT descriptors** in a grid-based approach:
 
 Monocular VO is inherently scale-ambiguous and prone to drift. The pipeline includes multiple safeguards:
 
-1. **Depth filtering during initialization**: Points outside [MIN_PARALLAX, MAX_DEPTH] rejected before bundle adjustment
+1. **Depth filtering during initialization**: Points outside [MIN_TRIANGULATION_DEPTH, MAX_TRIANGULATION_DEPTH] rejected before bundle adjustment
 2. **Reprojection validation**: New landmarks must reproject accurately (< 3px error) in both views
 3. **Duplicate prevention**: Features already in database are not re-triangulated
 4. **Observation filtering**: Old landmarks removed to prevent accumulation of drift
@@ -256,7 +267,7 @@ Each dataset loader handles camera calibration and image paths.
 2. Decrease `MIN_LANDMARKS_FOR_TRACKING` (50 → 30): Force keyframes earlier
 3. Increase `MAX_LAST_SEEN_FRAMES` (10 → 20): Keep landmarks longer
 4. Adjust `FAST_THRESH` (10 → 5): Lower threshold detects more corners
-5. Check `MAX_DEPTH` is appropriate for scene (increase for outdoor/distant scenes)
+5. Check `MAX_TRIANGULATION_DEPTH` is appropriate for scene (increase for outdoor/distant scenes)
 
 ### Too Many Features / Slow Performance
 
@@ -273,7 +284,7 @@ Each dataset loader handles camera calibration and image paths.
 
 **Solutions**:
 1. Enable scale consistency check in `validate_and_filter_new_landmarks` (currently commented)
-2. Decrease `MAX_DEPTH` to reject far/uncertain points
+2. Decrease `MAX_TRIANGULATION_DEPTH` to reject far/uncertain points
 3. Increase `MAX_REPROJECTION_ERROR_NEW_LANDMARKS` slightly if rejecting too many valid points
 4. Ensure initialization has sufficient baseline (check keyframe ratio threshold)
 
@@ -282,7 +293,7 @@ Each dataset loader handles camera calibration and image paths.
 **Symptoms**: No new landmarks added when moving from close to distant features
 
 **Solutions**:
-1. Increase `MAX_DEPTH` to accommodate scene depth range
+1. Increase `MAX_TRIANGULATION_DEPTH` to accommodate scene depth range
 2. Keep scale consistency check **disabled** (current default)
 3. Adjust `KEYFRAME_RATIO_THRESH` (0.2 → 0.15): More frequent keyframes
 
