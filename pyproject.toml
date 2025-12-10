@@ -8,6 +8,7 @@ dependencies = [
     # uv add <package> will automatically add here
     "pre-commit>=4.4.0",
     "rerun-sdk>=0.27.2",
+    "scipy>=1.16.3",
     "tyro>=0.9.35",
 ]
 
@@ -113,6 +114,8 @@ ignore = [
     "COM812",  # missing trailing comma in a collection
     "N806",  # variable in function should be lowercase
     "D104",  # missing docstring in public package
+    "ARG001",  # unused function argument
+    "RUF059", # unpacked variable is never used
 ]
 fixable = ["ALL"]
 [tool.ruff.lint.per-file-ignores]

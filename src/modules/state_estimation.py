@@ -1,4 +1,7 @@
+import cv2
 import numpy as np
+from scipy.optimize import least_squares
+from scipy.spatial.transform import Rotation as R_scipy
 
 
 def estimate_pose_pnp(
@@ -9,28 +12,49 @@ def estimate_pose_pnp(
     initial_t: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
-    Estimate camera pose from 3D-2D correspondences using PnP-RANSAC.
-
-    Steps:
-    1. Run P3P-RANSAC to find inliers and initial pose
-    2. Refine pose using all inliers (nonlinear optimization)
-    3. Compute reprojection error
-
-    Args:
-        points_3d: (N, 3) array of 3D landmark positions
-        points_2d: (N, 2) array of corresponding 2D image points
-        K: 3x3 camera calibration matrix
-        initial_R: Initial guess for rotation (optional)
-        initial_t: Initial guess for translation (optional)
-
-    Returns:
-        R: 3x3 estimated rotation matrix
-        t: 3x1 estimated translation vector
-        inlier_mask: (N,) boolean array indicating inliers
-        reprojection_error: mean reprojection error of inliers (pixels)
-
+    Estimate camera pose from 3D-2D correspondences using PnP-RANSAC + Nonlinear Refinement.
     """
-    pass
+    if len(points_3d) < 4:
+        return np.eye(3), np.zeros((3, 1)), np.zeros(len(points_3d), dtype=bool), 0.0
+
+    # init with pnp ransac
+    success, rvec_est, tvec_est, inliers = cv2.solvePnPRansac(
+        points_3d,
+        points_2d,
+        K,
+        distCoeffs=None,
+        iterationsCount=100,
+        reprojectionError=3.0,
+        confidence=0.99,
+        flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+
+    if not success or inliers is None or len(inliers) < 5:
+        return np.eye(3), np.zeros((3, 1)), np.zeros(len(points_3d), dtype=bool), 0.0
+
+    # boolean mask
+    inlier_mask = np.zeros(len(points_3d), dtype=bool)
+    inlier_mask[inliers.ravel()] = True
+
+    # convert rvec to rotation matrix
+    R_est, _ = cv2.Rodrigues(rvec_est)
+    t_est = tvec_est
+
+    # nonlinear refinement if enough points
+    if np.sum(inlier_mask) > 5:
+        R_refined, t_refined = refine_pose_nonlinear(
+            points_3d[inlier_mask], points_2d[inlier_mask], R_est, t_est, K
+        )
+    else:
+        R_refined, t_refined = R_est, t_est
+
+    # compute final reprojection error
+    errors = compute_reprojection_error(
+        points_3d[inlier_mask], points_2d[inlier_mask], R_refined, t_refined, K
+    )
+    mean_error = np.mean(errors)
+
+    return R_refined, t_refined, inlier_mask, mean_error
 
 
 def pnp_ransac(
@@ -103,7 +127,35 @@ def refine_pose_nonlinear(
         t_refined: 3x1 refined translation
 
     """
-    pass
+    # angle axis rotation represenation
+    r_vec_init, _ = cv2.Rodrigues(R_init)
+    x0 = np.hstack((r_vec_init.ravel(), t_init.ravel()))
+
+    def residuals(x: np.ndarray) -> np.ndarray:
+        r_vec = x[:3]
+        t_vec = x[3:].reshape(3, 1)
+        R_curr, _ = cv2.Rodrigues(r_vec)
+
+        # P = K(RX + t)
+        X_cam = (R_curr @ points_3d.T + t_vec).T  # (N, 3)
+
+        # avoid points behind camera
+        z = X_cam[:, 2] + 1e-9
+        u = K[0, 0] * X_cam[:, 0] / z + K[0, 2]
+        v = K[1, 1] * X_cam[:, 1] / z + K[1, 2]
+
+        proj_2d = np.stack([u, v], axis=1)
+        return (proj_2d - points_2d).ravel()
+
+    # reject outliers that RANSAC missed
+    res = least_squares(residuals, x0, loss="soft_l1", f_scale=1.0)
+
+    r_vec_final = res.x[:3]
+    t_vec_final = res.x[3:].reshape(3, 1)
+
+    R_final, _ = cv2.Rodrigues(r_vec_final)
+
+    return R_final, t_vec_final
 
 
 def compute_reprojection_error(
@@ -127,7 +179,9 @@ def compute_reprojection_error(
         errors: (N,) array of reprojection errors in pixels
 
     """
-    pass
+    projected = project_points(points_3d, R, t, K)
+    diff = projected - points_2d
+    return np.linalg.norm(diff, axis=1)
 
 
 def project_points(
@@ -149,4 +203,16 @@ def project_points(
         points_2d: (N, 2) projected 2D points
 
     """
-    pass
+    # T_cam = R * X + t
+    X_cam = (R @ points_3d.T + t).T  # (N, 3)
+
+    # perspective division
+    z = X_cam[:, 2] + 1e-9  # avoid zero div
+
+    # apply intrinsics
+    # u = fx * x/z + cx
+    # v = fy * y/z + cy
+    u = K[0, 0] * X_cam[:, 0] / z + K[0, 2]
+    v = K[1, 1] * X_cam[:, 1] / z + K[1, 2]
+
+    return np.stack([u, v], axis=1)

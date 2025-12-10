@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -14,16 +14,28 @@ from modules.dataset_loader import (
     OwnDataset,
     ParkingDataset,
 )
+from modules.feature_matching import extract_and_match_features
 from modules.initialization import initialize_vo
-from modules.utils import create_camera_matrix, create_empty_landmark_database
+from modules.landmark_management import (
+    add_new_candidates,
+    filter_landmarks,
+    update_landmark_database,
+)
+from modules.state_estimation import estimate_pose_pnp, project_points
+from modules.utils import (
+    create_camera_matrix,
+    create_empty_landmark_database,
+    save_trajectory,
+)
 from state.landmark_database import LandmarkDatabase
 from state.vo_state import VOState
 
 
 def init_rerun() -> None:
-    """Initialize Rerun logging."""
+    """Initialize Rerun logging with correct coordinate systems."""
     rr.init("Visual Odometry", spawn=True)
-    # log coordinate system
+
+    # forward +Z, right +X, down +Y
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
 
@@ -32,204 +44,253 @@ def log_frame_rerun(
     T_cw: np.ndarray,
     K: np.ndarray,
     frame_id: int,
-    landmarks: np.ndarray | None = None,
+    landmarks_3d: np.ndarray | None,
+    candidate_keypoints: np.ndarray | None,
+    trajectory_history: list[np.ndarray],
 ) -> None:
-    """
-    Log data to Rerun.
+    rr.set_time_sequence("frame", frame_id)
 
-    Args:
-        image: Current image (H, W).
-        T_cw: World-to-Camera pose (4x4).
-        K: Intrinsic matrix (3x3).
-        frame_id: Frame index.
-        landmarks: Optional 3D points (N, 3).
-
-    """
-    rr.set_time_sequence("frame_idx", frame_id)
-
-    # we need to convert T_cw (world -> camera) to T_wc (camera -> world).
+    # camera-world for rerurn
     R_cw = T_cw[:3, :3]
     t_cw = T_cw[:3, 3]
-
     R_wc = R_cw.T
     t_wc = -R_wc @ t_cw
 
-    # log camera in world frame
+    # log camera entity
     rr.log("world/camera", rr.Transform3D(translation=t_wc, mat3x3=R_wc))
 
-    # log pinhole model
+    viz_depth = 5
+    # pinhole logging
     rr.log(
         "world/camera/image",
-        rr.Pinhole(image_from_camera=K, width=image.shape[1], height=image.shape[0]),
+        rr.Pinhole(
+            image_from_camera=K,
+            width=image.shape[1],
+            height=image.shape[0],
+            image_plane_distance=viz_depth,
+        ),
     )
-
-    # log image
+    # log pixel data
     rr.log("world/camera/image", rr.Image(image))
 
-    # log landmarks
-    if landmarks is not None and len(landmarks) > 0:
-        rr.log("world/landmarks", rr.Points3D(landmarks, colors=[255, 255, 255]))
+    # project 3D map points back
+    if landmarks_3d is not None and len(landmarks_3d) > 0:
+        # T_cam = R * X + t
+        T_cam = (R_cw @ landmarks_3d.T + t_cw.reshape(3, 1)).T
 
+        # filter points behind camera
+        z = T_cam[:, 2]
+        valid_depth = z > 0.1
+        T_cam = T_cam[valid_depth]
+        z = z[valid_depth]
 
-def process_first_two_frames(
-    img1: np.ndarray,
-    img2: np.ndarray,
-    K: np.ndarray,
-    timestamp1: float = 0.0,
-    timestamp2: float = 0.0,
-) -> tuple[VOState, LandmarkDatabase, bool]:
-    """
-    Initialize the VO pipeline from first two frames.
+        # u = fx*x/z + cx
+        u = (K[0, 0] * T_cam[:, 0] / z) + K[0, 2]
+        v = (K[1, 1] * T_cam[:, 1] / z) + K[1, 2]
+        reprojections = np.stack([u, v], axis=1)
 
-    This is a convenience wrapper around initialize_vo.
+        rr.log(
+            "world/camera/image/reprojections",
+            rr.Points2D(reprojections, colors=[0, 255, 0], radii=2),
+        )
 
-    Args:
-        img1: First image
-        img2: Second image
-        K: 3x3 camera calibration matrix
-        timestamp1: Timestamp of first image
-        timestamp2: Timestamp of second image
+    # log candidate rays
+    if candidate_keypoints is not None and len(candidate_keypoints) > 0:
+        # visual dots on the 2D image
+        rr.log(
+            "world/camera/image/candidates",
+            rr.Points2D(candidate_keypoints, colors=[255, 0, 0], radii=2),
+        )
 
-    Returns:
-        vo_state: Initial VOState
-        landmark_db: Initial LandmarkDatabase
-        success: True if successful
+        # 3d rays emanating from camera center
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
 
-    """
-    return initialize_vo(img1, img2, K, timestamp1, timestamp2)
+        u = candidate_keypoints[:, 0]
+        v = candidate_keypoints[:, 1]
+
+        # project back to metric coords at depth z_end
+        x_end = (u - cx) * viz_depth / fx
+        y_end = (v - cy) * viz_depth / fy
+
+        zeros = np.zeros(len(u))
+        origins = np.stack([zeros, zeros, zeros], axis=1)
+        ends = np.stack([x_end, y_end, np.full_like(x_end, viz_depth)], axis=1)
+
+        strips = np.stack([origins, ends], axis=1)
+
+        # log as child of camera
+        rr.log(
+            "world/camera/candidates_rays",
+            rr.LineStrips3D(strips, colors=[255, 0, 0], radii=0.01),
+        )
+
+    # global point map and trajectory
+    if len(trajectory_history) > 1:
+        rr.log(
+            "world/trajectory",
+            rr.LineStrips3D([trajectory_history], colors=[255, 255, 0], radii=0.02),
+        )
+
+    if landmarks_3d is not None and len(landmarks_3d) > 0:
+        rr.log(
+            "world/landmarks", rr.Points3D(landmarks_3d, colors=[0, 255, 0], radii=0.03)
+        )
 
 
 def process_frame(
     img: np.ndarray,
+    img_prev: np.ndarray,
     vo_state: VOState,
-    vo_state_prev: VOState,
     landmark_db: LandmarkDatabase,
     K: np.ndarray,
     timestamp: float,
-    next_track_id: int,
-) -> tuple[VOState, LandmarkDatabase, bool, int]:
+) -> tuple[VOState, LandmarkDatabase, bool, dict]:
     """
-    Process a new frame in the VO pipeline.
-
-    Main iteration:
-    1. Extract features and match against landmark database
-    2. Estimate camera pose using PnP-RANSAC
-    3. Update VO state
-    4. Update landmark database (triangulate new, filter old)
-
-    Args:
-        img: New input image
-        vo_state: Current VO state
-        vo_state_prev: Previous VO state (for triangulation)
-        landmark_db: Current landmark database
-        K: 3x3 camera calibration matrix
-        timestamp: Timestamp of current frame
-        next_track_id: Next available track ID for new landmarks
-
-    Returns:
-        updated_vo_state: Updated VOState
-        updated_landmark_db: Updated LandmarkDatabase
-        success: True if frame processed successfully
-        next_track_id: Updated next track ID
-
+    Process Frame with detailed Debug Stats.
     """
-    pass
+    debug_stats = {}
 
+    # existing landmarks to track using KLT
+    lm_3d = landmark_db.landmarks_3d
+    if len(lm_3d) == 0:
+        return vo_state, landmark_db, False, {}
 
-def run_vo_pipeline(
-    images: list[np.ndarray],
-    timestamps: list[float],
-    K: np.ndarray,
-) -> tuple[list[VOState], LandmarkDatabase]:
-    """
-    Run complete VO pipeline on a sequence of images.
+    # project to prev frame
+    p1_projected = project_points(lm_3d, vo_state.R, vo_state.t, K)
 
-    Args:
-        images: List of images
-        timestamps: List of timestamps
-        K: 3x3 camera calibration matrix
-
-    Returns:
-        trajectory: List of VOState objects (one per frame)
-        final_landmark_db: Final landmark database
-
-    """
-    if len(images) < 2:
-        print("Error: Need at least 2 images")
-        return [], None
-
-    # Initialize from first two frames
-    vo_state, landmark_db, success = process_first_two_frames(
-        images[0],
-        images[1],
-        K,
-        timestamps[0],
-        timestamps[1],
+    # filter visible frames
+    h, w = img.shape
+    visible = (
+        (p1_projected[:, 0] >= 0)
+        & (p1_projected[:, 0] < w)
+        & (p1_projected[:, 1] >= 0)
+        & (p1_projected[:, 1] < h)
     )
 
-    if not success:
-        print("Initialization failed")
-        return [], None
+    p1_input = p1_projected[visible]
+    indices_input = np.where(visible)[0]
 
-    trajectory = [vo_state]
-    next_track_id = len(landmark_db.track_ids)
+    # track from previous to current frame using KLT
+    p2, p3d_tracked, ids_tracked_idx = extract_and_match_features(
+        img,
+        landmark_db,
+        prev_img=img_prev,
+        prev_keypoints=p1_input,
+        prev_landmark_indices=indices_input,
+    )
 
-    # Process remaining frames
-    for i in range(2, len(images)):
-        vo_state_prev = trajectory[-1]
+    debug_stats["tracked_landmarks"] = len(p2)
 
-        vo_state, landmark_db, success, next_track_id = process_frame(
-            images[i],
-            vo_state,
-            vo_state_prev,
-            landmark_db,
-            K,
-            timestamps[i],
-            next_track_id,
+    if len(p2) < 5:
+        return vo_state, landmark_db, False, debug_stats
+
+    # estimate camera pose using pnp ransac
+    R_new, t_new, inlier_mask, error = estimate_pose_pnp(
+        p3d_tracked, p2, K, initial_R=vo_state.R, initial_t=vo_state.t
+    )
+
+    num_inliers = np.sum(inlier_mask)
+    debug_stats["pnp_inliers"] = num_inliers
+
+    if num_inliers < 10:
+        return vo_state, landmark_db, False, debug_stats
+
+    # distance travelled
+    t_diff = t_new - vo_state.t
+    step_size = np.linalg.norm(t_diff)
+    debug_stats["step_size"] = step_size
+    # udpate state
+    new_state = VOState(
+        R=R_new,
+        t=t_new,
+        frame_id=vo_state.frame_id + 1,
+        timestamp=timestamp,
+        candidate_keypoints=vo_state.candidate_keypoints,
+        first_observation_keypoints=vo_state.first_observation_keypoints,
+        first_observation_poses=vo_state.first_observation_poses,
+        candidate_descriptors=vo_state.candidate_descriptors,
+    )
+
+    # candidate tracking
+    if len(new_state.candidate_keypoints) > 0:
+        lk_params = {
+            "winSize": (21, 21),
+            "maxLevel": 3,
+            "criteria": (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+        }
+        p1_cand = new_state.candidate_keypoints.astype(np.float32)
+        # track candidates for future triangulation
+        p2_cand, status, _ = cv2.calcOpticalFlowPyrLK(
+            img_prev, img, p1_cand, None, **lk_params
         )
 
-        if not success:
-            print(f"Frame {i} failed")
-            break
-
-        trajectory.append(vo_state)
-
-        if i % 10 == 0:
-            print(
-                f"Processed frame {i}/{len(images)}, "
-                f"{len(landmark_db.landmarks_3d)} landmarks",
+        good = status.ravel() == 1
+        if np.any(good):
+            p2_good = p2_cand[good]
+            in_bounds = (
+                (p2_good[:, 0] >= 0)
+                & (p2_good[:, 0] < w)
+                & (p2_good[:, 1] >= 0)
+                & (p2_good[:, 1] < h)
             )
 
-    return trajectory, landmark_db
+            final_mask = np.zeros_like(good)
+            good_indices = np.where(good)[0]
+            final_mask[good_indices[in_bounds]] = True
+            good = final_mask
 
+        new_state.candidate_keypoints = p2_cand[good]
+        new_state.first_observation_keypoints = new_state.first_observation_keypoints[
+            good
+        ]
+        new_state.first_observation_poses = new_state.first_observation_poses[good]
+        new_state.candidate_descriptors = new_state.candidate_descriptors[good]
 
-# ============================================================================
-# Example Usage
-# ============================================================================
+    debug_stats["active_candidates"] = len(new_state.candidate_keypoints)
+
+    # map management
+    prev_landmark_count = len(landmark_db.landmarks_3d)
+
+    landmark_db, new_state = update_landmark_database(
+        new_state,
+        vo_state,
+        landmark_db,
+        inlier_mask,
+        ids_tracked_idx,
+        current_frame_keypoints=new_state.candidate_keypoints,
+        current_frame_descriptors=new_state.candidate_descriptors,
+        K=K,
+    )
+
+    new_triangulated = len(landmark_db.landmarks_3d) - prev_landmark_count
+    debug_stats["new_triangulated"] = new_triangulated
+
+    # add new candidates
+    points_to_mask = p2
+    if len(new_state.candidate_keypoints) > 0:
+        points_to_mask = np.vstack((points_to_mask, new_state.candidate_keypoints))
+
+    new_state = add_new_candidates(new_state, img, points_to_mask, K)
+
+    # filter
+    landmark_db = filter_landmarks(landmark_db, vo_state=new_state, K=K)
+
+    return new_state, landmark_db, True, debug_stats
 
 
 @dataclass
 class Args:
-    """Command line arguments."""
-
-    # Dataset selection (default is kitti)
     dataset: Literal["kitti", "malaga", "parking", "own"] = "kitti"
-
-    # Path to data directory (defaults to ./data so you don't have to type it)
     path: Path = Path("data")
-
-    # Sequence (only used for KITTI)
     sequence: str = "05"
-
-    # Use cv2 for visualization instead of rerun
     cv2_viz: bool = False
+    headless: bool = False
 
 
 def main(args: Args) -> None:
-    """Run main function."""
-    # 1. Initialize Dataset
-    print(f"Initializing {args.dataset} dataset from {args.path}...")
-
+    # setup
+    print(f"Initializing {args.dataset}...")
     loader: BaseDataset
     if args.dataset == "kitti":
         loader = KittiDataset(args.path, sequence=args.sequence)
@@ -241,65 +302,87 @@ def main(args: Args) -> None:
         loader = OwnDataset(args.path)
 
     if not loader.image_files:
-        print(f"Error: No images found in {args.path}")
+        print("Error: No images found.")
         return
 
-    print(f"Loaded {len(loader.image_files)} images.")
-    print(f"Camera Matrix K:\n{loader.K}\n")
-
-    # 2. Initialize Rerun if requested
-    if not args.cv2_viz:
+    if not args.cv2_viz and not args.headless:
         init_rerun()
 
-    # 3. Dummy Loop (Plays back images)
-    print("Starting processing loop...")
+    # initialization
+    print("Bootstrapping...")
+    img0 = cv2.imread(str(loader.image_files[0]), cv2.IMREAD_GRAYSCALE)
+    idx_init = 2 if len(loader.image_files) > 2 else 1
+    img_init = cv2.imread(str(loader.image_files[idx_init]), cv2.IMREAD_GRAYSCALE)
 
-    # Placeholder for the actual VO pipeline state
-    # vo_state = VOState(...)
+    vo_state, landmark_db, success = initialize_vo(img0, img_init, loader.K)
 
-    for i, img_path in enumerate(loader.image_files):
-        # Read image
-        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+    if not success:
+        print("Bootstrapping failed.")
+        return
+
+    vo_state.frame_id = idx_init
+
+    # camera center C = -R.T * t
+    C_init = -vo_state.R.T @ vo_state.t
+    trajectory_history = [C_init.flatten()]
+
+    full_trajectory = [vo_state]
+
+    print(f"Continuous VO (Starting Frame {idx_init + 1})...")
+    prev_img = img_init
+
+    for i in range(idx_init + 1, len(loader.image_files)):
+        img = cv2.imread(str(loader.image_files[i]), cv2.IMREAD_GRAYSCALE)
         if img is None:
             continue
 
-        # --- TODO: INSERT VO PIPELINE HERE ---
-        # T_cw = vo.process(img, i)
+        new_state, landmark_db, success, stats = process_frame(
+            img, prev_img, vo_state, landmark_db, loader.K, float(i)
+        )
+        step_size = stats.get("step_size", 0.0)
 
-        # For now, we use a dummy identity pose just to make the visualizer work
-        T_cw = np.eye(4)
-        # -------------------------------------
+        print(
+            f"Frame {i:04d} | "
+            f"LMs: {len(landmark_db.landmarks_3d):04d} | "
+            f"Tracked: {stats.get('tracked_landmarks', 0):03d} | "
+            f"Inliers: {stats.get('pnp_inliers', 0):03d} | "
+            f"Distance delta: {step_size:.4f} | "
+            f"Cands: {stats.get('active_candidates', 0):03d} | "
+            f"NewTri: {stats.get('new_triangulated', 0):02d}"
+        )
 
-        # Visualization
-        if args.cv2_viz:
-            # Standard OpenCV window
-            cv2.imshow("VO Skeleton", img)
-            cv2.setWindowTitle("VO Skeleton", f"Frame {i} - {args.dataset}")
-            if cv2.waitKey(1) == 27:  # ESC to stop
-                break
-        else:
-            log_frame_rerun(img, T_cw, loader.K, i)
+        if not success:
+            print(f"!!! VO FAILED at Frame {i} !!!")
+            break
 
-    cv2.destroyAllWindows()
-    print("\nDone! Skeleton loop finished.")
+        vo_state = new_state
+        prev_img = img
 
-    empty_db = create_empty_landmark_database()
-    print(f"Empty database created with {len(empty_db.landmarks_3d)} landmarks\n")
+        # calculate camera center
+        C_curr = -vo_state.R.T @ vo_state.t
+        trajectory_history.append(C_curr.flatten())
+        full_trajectory.append(vo_state)
 
-    # what to implement next
-    print("Monocular VO functional skeleton ready!")
-    print("\nMain functions to implement:")
-    print("  - detect_keypoints_and_descriptors()")
-    print("  - match_descriptors()")
-    print("  - estimate_pose_2d_to_2d()")
-    print("  - triangulate_points()")
-    print("  - estimate_pose_pnp()")
-    print("  - pnp_ransac()")
-    print("  - p3p()")
-    print("  - update_landmark_database()")
+        # ciz
+        if not args.headless and not args.cv2_viz:
+            T_cw = np.eye(4)
+            T_cw[:3, :3] = vo_state.R
+            T_cw[:3, 3] = vo_state.t.flatten()
+
+            log_frame_rerun(
+                img,
+                T_cw,
+                loader.K,
+                i,
+                landmark_db.landmarks_3d,
+                vo_state.candidate_keypoints,
+                trajectory_history,
+            )
+
+    save_trajectory(full_trajectory, "trajectory.txt")
+    print("Done.")
 
 
 if __name__ == "__main__":
-    # use tyro for intuitive argument parsing and help
     args = tyro.cli(Args)
     main(args)

@@ -1,5 +1,7 @@
+import cv2
 import numpy as np
 
+from modules.utils import create_empty_landmark_database
 from state.landmark_database import LandmarkDatabase
 from state.vo_state import VOState
 
@@ -34,22 +36,103 @@ def initialize_vo(
         success: True if initialization successful
 
     """
-    pass
+    # detect features
+    kpts1, desc1 = detect_keypoints_and_descriptors(img1)
+    kpts2, desc2 = detect_keypoints_and_descriptors(img2)
+
+    if len(kpts1) < 50 or len(kpts2) < 50:
+        print(f"Initialization failed: Too few keypoints ({len(kpts1)}, {len(kpts2)})")
+        return (
+            VOState(np.eye(3), np.zeros((3, 1)), 0, 0.0),
+            create_empty_landmark_database(),
+            False,
+        )
+
+    # match features
+    matches = match_descriptors(desc1, desc2)
+    if len(matches) < 20:
+        print(f"Initialization failed: Too few matches ({len(matches)})")
+        return (
+            VOState(np.eye(3), np.zeros((3, 1)), 0, 0.0),
+            create_empty_landmark_database(),
+            False,
+        )
+
+    # align points for 5-point algo
+    pts1 = kpts1[matches[:, 0]]
+    pts2 = kpts2[matches[:, 1]]
+
+    # get essential amtrix
+    R, t, inlier_mask = estimate_pose_2d_to_2d(pts1, pts2, K)
+
+    num_inliers = np.sum(inlier_mask)
+    if num_inliers < 15:
+        print(f"Initialization failed: Too few inliers ({num_inliers})")
+        return (
+            VOState(np.eye(3), np.zeros((3, 1)), 0, 0.0),
+            create_empty_landmark_database(),
+            False,
+        )
+
+    print(f"Initialized with {num_inliers} / {len(matches)} inliers.")
+
+    # filter outliers
+    pts1_inliers = pts1[inlier_mask.ravel() == 1]
+    pts2_inliers = pts2[inlier_mask.ravel() == 1]
+
+    # take descriptors from newest image for db
+    desc_inliers = desc2[matches[:, 1]][inlier_mask.ravel() == 1]
+
+    # triangulate initial points
+    R1, t1 = np.eye(3), np.zeros((3, 1))
+    points_3d = triangulate_points(pts1_inliers, pts2_inliers, R1, t1, R, t, K)
+
+    # create db object
+    landmark_db = create_initial_landmark_database(points_3d, desc_inliers)
+
+    # current state is newest state
+    vo_state = VOState(
+        R=R,
+        t=t,
+        frame_id=1,
+        timestamp=timestamp2,
+    )
+
+    return vo_state, landmark_db, True
 
 
 def detect_keypoints_and_descriptors(img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
-    Detect keypoints and compute descriptors in image.
-
-    Args:
-        img: Input grayscale image
-
-    Returns:
-        keypoints: (N, 2) array of [u, v] coordinates
-        descriptors: (N, D) array of feature descriptors
-
+    Detect keypoints using Shi-Tomasi (GFTT) and compute ORB descriptors.
+    We use GFTT because it provides better 'trackable' features for KLT later,
+    but we compute descriptors here for the robust initialization matching.
     """
-    pass
+    # track using shi tomasi
+    feature_params = {
+        "maxCorners": 2000,
+        "qualityLevel": 0.01,
+        "minDistance": 7,
+        "blockSize": 7,
+    }
+    pts = cv2.goodFeaturesToTrack(img, mask=None, **feature_params)
+
+    if pts is None:
+        return np.empty((0, 2)), np.empty((0, 32))
+
+    # convert to keypoint objects for descriptor computation
+    kps = [cv2.KeyPoint(x=f[0][0], y=f[0][1], size=20) for f in pts]
+
+    # compute orb descirptors
+    orb = cv2.ORB_create()
+    kps, descriptors = orb.compute(img, kps)
+
+    if descriptors is None:
+        return np.empty((0, 2)), np.empty((0, 32))
+
+    # convert to numpy
+    keypoints = np.array([kp.pt for kp in kps], dtype=np.float32)
+
+    return keypoints, descriptors
 
 
 def match_descriptors(
@@ -58,7 +141,7 @@ def match_descriptors(
     ratio_threshold: float = 0.8,
 ) -> np.ndarray:
     """
-    Match descriptors between two sets using ratio test.
+    Match descriptors between two sets using ratio test and brute force hamming distance.
 
     Args:
         desc1: (N1, D) descriptors from first image
@@ -69,7 +152,18 @@ def match_descriptors(
         matches: (M, 2) array where each row is [idx1, idx2]
 
     """
-    pass
+    if desc1 is None or desc2 is None or len(desc1) == 0 or len(desc2) == 0:
+        return np.empty((0, 2), dtype=np.int32)
+
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    knn_matches = matcher.knnMatch(desc1, desc2, k=2)
+
+    good_matches = []
+    for m, n in knn_matches:
+        if m.distance < ratio_threshold * n.distance:
+            good_matches.append([m.queryIdx, m.trainIdx])
+
+    return np.array(good_matches, dtype=np.int32)
 
 
 def estimate_pose_2d_to_2d(
@@ -93,7 +187,22 @@ def estimate_pose_2d_to_2d(
         inlier_mask: (N,) boolean array indicating inliers
 
     """
-    pass
+    # principal point
+    pp = (K[0, 2], K[1, 2])
+    focal = K[0, 0]  # fx approx fy
+
+    # find essential matrix
+    E, mask = cv2.findEssentialMat(
+        kpts1, kpts2, focal=focal, pp=pp, method=cv2.RANSAC, prob=0.999, threshold=1.0
+    )
+
+    if E is None or E.shape != (3, 3):
+        return np.eye(3), np.zeros((3, 1)), np.zeros(len(kpts1), dtype=bool)
+
+    # recover pose from essential matrix
+    _, R, t, mask_pose = cv2.recoverPose(E, kpts1, kpts2, focal=focal, pp=pp, mask=mask)
+
+    return R, t, mask_pose.astype(bool)
 
 
 def triangulate_points(
@@ -121,7 +230,15 @@ def triangulate_points(
         points_3d: (N, 3) array of triangulated 3D points
 
     """
-    pass
+    # projection matrices P = K * [R|t]
+    P1 = K @ np.hstack((R1, t1))
+    P2 = K @ np.hstack((R2, t2))
+
+    # triangulate (4xN)
+    pts4d = cv2.triangulatePoints(P1, P2, kpts1.T, kpts2.T)
+
+    # convert to 3D (N, 3)
+    return (pts4d[:3] / pts4d[3]).T
 
 
 def create_initial_landmark_database(
@@ -139,4 +256,17 @@ def create_initial_landmark_database(
         landmark_db: Initial LandmarkDatabase
 
     """
-    pass
+    N = len(landmarks_3d)
+
+    # create sequential IDs
+    track_ids = np.arange(N, dtype=np.int32)
+
+    # initialize observation count
+    num_observations = np.full(N, 2, dtype=np.int32)
+
+    return LandmarkDatabase(
+        landmarks_3d=landmarks_3d,
+        descriptors=descriptors,
+        track_ids=track_ids,
+        num_observations=num_observations,
+    )
