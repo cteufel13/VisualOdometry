@@ -47,13 +47,16 @@ def detect_new_features(
     """
     h, w = img.shape
 
+    # base mask
     if mask is None:
         mask = np.ones((h, w), dtype=np.uint8) * 255
 
+    # sky mask
+    sky_cutoff = int(h * config.sky_percentage)
+    mask[0:sky_cutoff, :] = 0
+
     n_rows = config.grid_rows
     n_cols = config.grid_cols
-
-    # target points per cell
     features_per_cell = config.num_features // (n_rows * n_cols)
 
     cell_h = h // n_rows
@@ -63,23 +66,29 @@ def detect_new_features(
 
     for r in range(n_rows):
         for c in range(n_cols):
-            # define cell boundaries
             x1 = c * cell_w
             y1 = r * cell_h
             x2 = x1 + cell_w
             y2 = y1 + cell_h
 
-            # create cell mask
+            # skip cells that are fully masked by optimization
+            if np.sum(mask[y1:y2, x1:x2]) == 0:
+                continue
+
             cell_mask = np.zeros_like(mask)
             cell_mask[y1:y2, x1:x2] = mask[y1:y2, x1:x2]
 
-            # detect in this cell
-            # relax quality slightly to find points in textureless areas
+            current_quality = config.quality_level
+            if r > n_rows // 2:
+                current_quality = (
+                    config.quality_level * 0.5
+                )  # more sensitive on the lower side of the road
+
             cell_pts = cv2.goodFeaturesToTrack(
                 img,
                 mask=cell_mask,
                 maxCorners=features_per_cell,
-                qualityLevel=config.quality_level,
+                qualityLevel=current_quality,
                 minDistance=config.min_distance,
                 blockSize=config.block_size,
                 useHarrisDetector=False,

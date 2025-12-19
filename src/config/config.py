@@ -36,7 +36,10 @@ class VOConfig:
     # optical flow
     lk_win_size: tuple[int, int] = (21, 21)
     lk_max_level: int = 3
-    enable_window_ba: bool = True
+    enable_window_ba: bool = False
+
+    # sky mask
+    sky_percentage = 1.0
 
 
 def get_config(dataset: str) -> VOConfig:
@@ -71,8 +74,8 @@ def get_config(dataset: str) -> VOConfig:
         cfg.min_distance = 1
         cfg.quality_level = 0.001
         cfg.block_size = 3
-        cfg.num_features = 2000
-        cfg.max_reproj_err = 9.0
+        cfg.num_features = 3000
+        cfg.max_reproj_err = 15.0
         cfg.init_min_parallax = 30.0
         cfg.min_ray_angle_deg = 0.5
         cfg.pnp_min_inliers = 10
@@ -81,6 +84,7 @@ def get_config(dataset: str) -> VOConfig:
         cfg.grid_cols = 4
         cfg.lk_win_size = (11, 11)
         cfg.min_distance = 10
+        cfg.sky_percentage = 0.55
 
     elif dataset == "parking":
         cfg.quality_level = 0.005
