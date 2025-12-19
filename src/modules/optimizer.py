@@ -111,7 +111,7 @@ def bundle_adjustment_window(
         errs = np.linalg.norm(proj.reshape(-1, 2) - np.array(obs_local), axis=1)
 
         for k, err in enumerate(errs):
-            if err > 3.0:
+            if err > 5.0:
                 bad_points.add(pids_local[k])
 
     if len(bad_points) > 0:

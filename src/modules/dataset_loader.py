@@ -95,7 +95,7 @@ class MalagaDataset(BaseDataset):
             / "malaga"
             / "malaga-urban-dataset-extract-07_rectified_800x600_Images"
         )
-        self.image_files = sorted(img_dir.glob("*.jpg"))
+        self.image_files = sorted(img_dir.glob("*_left.jpg"))
         print(f"Loaded {len(self.image_files)} image paths from Malaga")
 
 

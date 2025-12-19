@@ -2,8 +2,8 @@ import numpy as np
 import cv2
 import rerun as rr
 from modules.backend import (
-    detect_features,
-    match_features,
+    detect_new_features,
+    track_optical_flow,
     triangulate_and_filter,
 )
 from modules.optimizer import bundle_adjustment_window
@@ -12,45 +12,53 @@ from config.config import VOConfig
 
 class VisualOdometry:
     """
-    Robust Visual Odometry Pipeline.
-    Includes 'Soft Reset' logic to continue trajectory after tracking loss.
+    Cleaned Visual Odometry Pipeline.
+    Philosophy: Robust Tracking, Conservative Mapping.
     """
 
     def __init__(self, K: np.ndarray, config: VOConfig):
         self.K = K
         self.cfg = config
         self.frame_id = 0
+        self.prev_img = None
 
         # state
-        self.state = "INIT"
-        self.T_wc = np.eye(4)
-        self.T_wc_last_kf = np.eye(4)
+        self.state = "INIT"  # INIT, TRACKING
+        self.T_wc = np.eye(4)  # Current Pose
+        self.T_wc_last_kf = np.eye(4)  # pose of last keyframe
         self.T_velocity = np.eye(4)
-
-        # Soft Reset Memory
-        self.last_known_T_wc = np.eye(4)  # Anchor for re-initialization
-
-        # data
+        # map {id: [x,y,z]}
         self.map_points = {}
-        self.prev_kps = np.empty((0, 2))
-        self.prev_des = np.empty((0, 128))
-        self.prev_idx_to_id = np.empty((0,), dtype=int)
-        self.candidates = {}
+
+        # active tracking arrays
+        self.lm_pts3d = np.empty((0, 3))  # 3D coords of tracked points
+        self.lm_pts2d = np.empty((0, 2))  # 2D coords in current frame
+        # NEW: Store previous location of tracked points for 2D recovery
+        self.prev_lm_pts2d = np.empty((0, 2))
+        self.lm_ids = np.empty((0,), dtype=int)  # Global IDs
+
+        # candidates
+        self.cand_curr_2d = np.empty((0, 2))
+        self.cand_first_2d = np.empty((0, 2))
+        self.cand_first_pose_wc = []  # Pose where candidate was first seen
+
+        # Keyframe History for BA
         self.keyframes = []
-        self.promoted_cids = {}
 
-        # IDs
+        # ID generation
         self.next_pt_id = 0
-        self.next_cand_id = 0
 
-        # visualization
+        # Visualization
         self.trajectory_points = []
 
-        # rerun setup
+        self.probation_counter = 0
+
+        # Rerun setup
         rr.init("Visual Odometry", spawn=True)
         rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
     def get_T_cw(self) -> np.ndarray:
+        """Helper: World -> Camera"""
         R_wc = self.T_wc[:3, :3]
         t_wc = self.T_wc[:3, 3]
         T_cw = np.eye(4)
@@ -61,373 +69,525 @@ class VisualOdometry:
     def process_frame(self, img: np.ndarray):
         """Main Loop"""
 
-        # --- Preprocessing ---
-        mask = np.full(img.shape, 255, dtype=np.uint8)
-        mask[:100, :] = 0
+        # # Apply CLAHE to extract features from blurry/dark regions
+        # clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        # img_enhanced = clahe.apply(img)
 
-        # 1. Detect
-        curr_kps, curr_des = detect_features(img, self.cfg, mask=mask)
-        rr.log("diagnostics/features/detected", rr.Scalars(len(curr_kps)))
-
-        # Bootstrap for Frame 0
-        if self.frame_id == 0:
-            self.prev_kps = curr_kps
-            self.prev_des = curr_des
-            self.prev_idx_to_id = np.full(len(curr_kps), -1, dtype=int)
-            for i in range(len(curr_kps)):
-                self._create_candidate(i, curr_kps[i])
+        # Use img_enhanced for EVERYTHING (Tracking + Feature Detection)
+        # img = img_enhanced
+        if self.prev_img is None:
+            self.prev_img = img
+            # Bootstrap: Find features, don't map yet
+            self.cand_curr_2d = detect_new_features(img, None, self.cfg)
+            self.cand_first_2d = self.cand_curr_2d.copy()
+            curr_pose = self.T_wc.copy()
+            self.cand_first_pose_wc = [curr_pose for _ in range(len(self.cand_curr_2d))]
             self.frame_id += 1
             return
 
-        # 2. Match
-        match_idx_prev, match_idx_curr = match_features(
-            self.prev_des, curr_des, self.cfg
-        )
-        rr.log("diagnostics/features/matches", rr.Scalars(len(match_idx_prev)))
+        self._track_features(img)
 
-        active_lm_ids = []
-        active_lm_pts2d = []
-        active_lm_pts3d = []
-        active_cand_ids = []
-        active_cand_pts2d = []
-        flow_lines = []
-
-        for i in range(len(match_idx_prev)):
-            p_idx = match_idx_prev[i]
-            c_idx = match_idx_curr[i]
-
-            obj_id = self.prev_idx_to_id[p_idx]
-            curr_pt = curr_kps[c_idx]
-            prev_pt = self.prev_kps[p_idx]
-
-            flow_lines.append([prev_pt, curr_pt])
-
-            if obj_id >= 0:
-                if obj_id in self.map_points:
-                    active_lm_ids.append(obj_id)
-                    active_lm_pts2d.append(curr_pt)
-                    active_lm_pts3d.append(self.map_points[obj_id])
-            elif obj_id < -1:
-                cand_id = -1 * (obj_id + 2)
-                if cand_id in self.candidates:
-                    active_cand_ids.append(cand_id)
-                    active_cand_pts2d.append(curr_pt)
-
-        active_lm_ids = np.array(active_lm_ids)
-        active_lm_pts2d = np.array(active_lm_pts2d)
-        active_lm_pts3d = np.array(active_lm_pts3d)
-
-        # 3. State Machine
-        self.promoted_cids = {}
-
+        # state machine
         if self.state == "INIT":
-            self._process_initialization(active_cand_ids, active_cand_pts2d)
+            self._process_initialization()
         elif self.state == "TRACKING":
-            tracking_ok = self._process_tracking(
-                active_lm_pts3d, active_lm_pts2d, active_lm_ids
-            )
+            self._process_tracking()
+            # replenish features in empty regions so we don't go blind during turns
+            self._replenish_features(img)
 
-            # ONLY triangulate if tracking survived.
-            # If tracking failed, it wiped self.candidates, so triangulation would crash.
-            if tracking_ok:
-                self._process_triangulation(active_cand_ids, active_cand_pts2d)
+        # visualization
+        self._log_state(img)
 
-        # 4. Update ID Map
-        next_idx_to_id = np.full(len(curr_kps), -1, dtype=int)
-
-        for i in range(len(match_idx_prev)):
-            p_idx = match_idx_prev[i]
-            c_idx = match_idx_curr[i]
-            prev_id_tag = self.prev_idx_to_id[p_idx]
-
-            if prev_id_tag < -1:
-                cid = -1 * (prev_id_tag + 2)
-                if cid in self.promoted_cids:
-                    next_idx_to_id[c_idx] = self.promoted_cids[cid]
-                else:
-                    next_idx_to_id[c_idx] = prev_id_tag
-            else:
-                next_idx_to_id[c_idx] = prev_id_tag
-
-        # New Candidates
-        mask_matched = np.zeros(len(curr_kps), dtype=bool)
-        mask_matched[match_idx_curr] = True
-        new_indices = np.where(~mask_matched)[0]
-
-        for idx in new_indices:
-            tag = self._create_candidate(idx, curr_kps[idx])
-            next_idx_to_id[idx] = tag
-
-        # Swap
-        self.prev_kps = curr_kps
-        self.prev_des = curr_des
-        self.prev_idx_to_id = next_idx_to_id
-
-        # 5. Visualization
-        self._log_state(img, flow_lines, active_lm_pts2d)
+        # Update previous frame
+        self.prev_img = img
         self.frame_id += 1
 
-    def _create_candidate(self, idx, pt):
-        cid = self.next_cand_id
-        self.next_cand_id += 1
-        self.candidates[cid] = {
-            "first_pose": self.T_wc.copy(),
-            "first_pt": pt,
-        }
-        return -1 * cid - 2
+    def _track_features(self, img: np.ndarray):
+        """
+        KLT Tracking with Motion Compensation.
+        Crucial: Calculates flow guess to help KLT during fast turns.
+        """
+        # motion compensation
+        flow_guess = None
+        if len(self.lm_pts3d) > 0 and self.state == "TRACKING":
+            # apply constant velocity model
+            T_pred = self.T_velocity @ self.T_wc
+            R_pred, t_pred = T_pred[:3, :3], T_pred[:3, 3]
+            r_vec, _ = cv2.Rodrigues(R_pred.T)
+            t_vec = -R_pred.T @ t_pred
 
-    def _process_tracking(self, lm_pts3d, lm_pts2d, lm_ids):
-        """PnP + Tracking"""
-        rr.log("diagnostics/pnp/input_points", rr.Scalars(len(lm_pts3d)))
+            # Project 3D points to getting expected 2D locations
+            pts2d_pred, _ = cv2.projectPoints(self.lm_pts3d, r_vec, t_vec, self.K, None)
+            pts2d_pred = pts2d_pred.reshape(-1, 2)
+            flow_guess = pts2d_pred - self.lm_pts2d
 
-        if len(lm_pts3d) < self.cfg.pnp_min_inliers:
-            print(f"Tracking Lost: Low points {len(lm_pts3d)}. SOFT RESET.")
+        # track landmarks
+        valid_lm = np.zeros(len(self.lm_pts2d), dtype=bool)
+        if len(self.lm_pts2d) > 0:
+            # Save the state before tracking updates it, so we have (Frame k-1, Frame k) pairs
+            self.prev_lm_pts2d = self.lm_pts2d.copy()
+            p2, valid_lm = track_optical_flow(
+                self.prev_img, img, self.lm_pts2d, self.cfg, flow_guess=flow_guess
+            )
 
-            # --- SOFT RESET LOGIC ---
-            # 1. Save where we died
-            self.last_known_T_wc = self.T_wc.copy()
-            # 2. Clear candidates (they are mixed history, bad for 5-pt)
-            self.candidates.clear()
-            # 3. Reset velocity
-            self.T_velocity = np.eye(4)
-            # 4. Enter Init Mode
+            # flow vector logging
+            if np.any(valid_lm):
+                flow_vecs = p2[valid_lm] - self.lm_pts2d[valid_lm]
+                flow_mags = np.linalg.norm(flow_vecs, axis=1)
+
+                rr.log("diagnostics/flow/avg_mag", rr.Scalars(np.mean(flow_mags)))
+                rr.log(
+                    "world/camera/image/flow_vectors",
+                    rr.Arrows2D(
+                        origins=self.lm_pts2d[valid_lm],
+                        vectors=flow_vecs,
+                        colors=[0, 255, 255],
+                    ),
+                )
+
+            # Filter current points
+            self.lm_pts2d = p2[valid_lm]
+            self.lm_pts3d = self.lm_pts3d[valid_lm]
+            self.lm_ids = self.lm_ids[valid_lm]
+
+            # Ensure prev matches before filtering
+            if len(self.prev_lm_pts2d) == len(valid_lm):
+                self.prev_lm_pts2d = self.prev_lm_pts2d[valid_lm]
+            else:
+                # Desync fallback
+                self.prev_lm_pts2d = self.lm_pts2d.copy()
+
+        # C. Track Candidates (2D - waiting for init)
+        if len(self.cand_curr_2d) > 0:
+            # We use the average flow of landmarks to guess candidate flow if possible
+            cand_guess = None
+            if flow_guess is not None and len(flow_guess) > 0:
+                avg_flow = (
+                    np.mean(flow_guess[valid_lm], axis=0)
+                    if np.any(valid_lm)
+                    else np.array([0.0, 0.0])
+                )
+                cand_guess = np.tile(avg_flow, (len(self.cand_curr_2d), 1))
+
+            c2, valid_cand = track_optical_flow(
+                self.prev_img, img, self.cand_curr_2d, self.cfg, flow_guess=cand_guess
+            )
+
+            self.cand_curr_2d = c2[valid_cand]
+            self.cand_first_2d = self.cand_first_2d[valid_cand]
+            # List comprehension to filter the pose list
+            self.cand_first_pose_wc = [
+                self.cand_first_pose_wc[i] for i, v in enumerate(valid_cand) if v
+            ]
+
+    def _process_initialization(self):
+        """Standard 5-Point Algorithm Initialization"""
+        # Check parallax
+        if len(self.cand_curr_2d) < 50:
+            return  # Wait for more points
+
+        disp = np.linalg.norm(self.cand_curr_2d - self.cand_first_2d, axis=1)
+        if np.mean(disp) < self.cfg.init_min_parallax:
+            return  # Not enough movement yet
+
+        # 1. Essential Matrix
+        E, mask = cv2.findEssentialMat(
+            self.cand_first_2d,
+            self.cand_curr_2d,
+            self.K,
+            method=cv2.RANSAC,
+            prob=0.999,
+            threshold=1.0,
+        )
+        if E is None:
+            return
+
+        # 2. Recover Pose
+        _, R, t, _ = cv2.recoverPose(E, self.cand_first_2d, self.cand_curr_2d, self.K)
+
+        # 3. Construct Pose (Camera 2 in World)
+        # Note: recoverPose gives R, t from 1 to 2.
+        T_rel = np.eye(4)
+        T_rel[:3, :3] = R
+        T_rel[:3, 3] = t.flatten()
+
+        # Assume Frame 0 was at Identity. Frame k is at T_motion_inv
+        T_motion = np.linalg.inv(T_rel)
+        self.T_wc = T_motion
+
+        # 4. Triangulate Initial Map
+        T_cw_init = self.get_T_cw()
+        pts3d, mask_tri, _ = triangulate_and_filter(
+            np.eye(4),
+            T_cw_init,  # T_cw1, T_cw2
+            self.cand_first_2d,
+            self.cand_curr_2d,
+            self.K,
+            self.cfg,
+        )
+
+        # 5. Store
+        self.lm_pts3d = pts3d[mask_tri]
+        self.lm_pts2d = self.cand_curr_2d[mask_tri]
+
+        # Initialize prev_pts logic for next frame
+        self.prev_lm_pts2d = self.lm_pts2d.copy()
+
+        # Generate IDs
+        num_new = len(self.lm_pts3d)
+        self.lm_ids = np.arange(self.next_pt_id, self.next_pt_id + num_new)
+        self.next_pt_id += num_new
+
+        # 6. Create First Keyframe
+        self._add_keyframe()
+
+        self.state = "TRACKING"
+        print(f"initialized with {num_new} points.")
+        self.T_wc_last_kf = self.T_wc.copy()
+
+    def _process_tracking(self):
+        """
+        Robust Tracking Logic: Parallax-Gated Keyframe Selection.
+        Prevents "Bush Explosions" by ensuring geometric baseline before mapping.
+        """
+        if len(self.lm_pts3d) < 6:
+            print("CRITICAL: Lost Tracking. Resetting.")
             self.state = "INIT"
-            return False
+            return
 
-        # Predict Pose
+        T_wc_prev = self.T_wc.copy()
+
+        # --- 1. Pose Estimation (PnP) ---
         T_guess = self.T_velocity @ self.T_wc
-        T_guess_cw = np.linalg.inv(T_guess)
+        R_guess = T_guess[:3, :3]
+        t_guess = T_guess[:3, 3]
 
-        r_vec_guess, _ = cv2.Rodrigues(T_guess_cw[:3, :3])
-        r_vec_guess = np.ascontiguousarray(r_vec_guess, dtype=np.float64)
-        t_vec_guess = T_guess_cw[:3, 3].reshape(3, 1)
-        t_vec_guess = np.ascontiguousarray(t_vec_guess, dtype=np.float64)
-
-        lm_pts3d = np.ascontiguousarray(lm_pts3d, dtype=np.float64)
-        lm_pts2d = np.ascontiguousarray(lm_pts2d, dtype=np.float64)
+        R_guess_cw = R_guess.T
+        t_guess_cw = -R_guess.T @ t_guess
+        r_vec, _ = cv2.Rodrigues(R_guess_cw)
 
         success, rvec, tvec, inliers = cv2.solvePnPRansac(
-            lm_pts3d,
-            lm_pts2d,
+            self.lm_pts3d,
+            self.lm_pts2d,
             self.K,
             None,
-            rvec=r_vec_guess,
-            tvec=t_vec_guess,
+            rvec=r_vec,
+            tvec=t_guess_cw,
             useExtrinsicGuess=True,
             iterationsCount=self.cfg.pnp_ransac_iter,
             reprojectionError=self.cfg.max_reproj_err,
-            flags=cv2.SOLVEPNP_ITERATIVE,
         )
 
-        inlier_count = len(inliers) if inliers is not None else 0
-        rr.log("diagnostics/pnp/inliers", rr.Scalars(inlier_count))
+        tracking_reliable = False
 
-        if success and inlier_count > self.cfg.pnp_min_inliers:
+        if success and len(inliers) > self.cfg.pnp_min_inliers:
+            # --- Path A: Tracking Good ---
             R_pnp, _ = cv2.Rodrigues(rvec)
             t_pnp = tvec.flatten()
 
-            T_wc_prev = self.T_wc.copy()
             self.T_wc = np.eye(4)
             self.T_wc[:3, :3] = R_pnp.T
             self.T_wc[:3, 3] = -R_pnp.T @ t_pnp
 
+            # Update Velocity
             self.T_velocity = self.T_wc @ np.linalg.inv(T_wc_prev)
 
-            # Keyframe Logic (Parallax)
-            R_last = self.T_wc_last_kf[:3, :3]
-            C_last = self.T_wc_last_kf[:3, 3]
+            # Filter Outliers
+            inliers = inliers.flatten()
+            self.lm_pts3d = self.lm_pts3d[inliers]
+            self.lm_pts2d = self.lm_pts2d[inliers]
+            self.lm_ids = self.lm_ids[inliers]
+
+            # Sync prev_pts
+            if len(self.prev_lm_pts2d) == len(inliers):
+                self.prev_lm_pts2d = self.prev_lm_pts2d[inliers]
+            else:
+                self.prev_lm_pts2d = self.lm_pts2d.copy()
+
+            tracking_reliable = True
+
+            if self.probation_counter > 0:
+                print(f"Tracking recovering... Probation: {self.probation_counter}")
+                self.probation_counter -= 1
+
+        else:
+            # --- Path B: Coasting ---
+            print("PnP Failed. Coasting (No Mapping).")
+            self.T_wc = T_guess
+            tracking_reliable = False
+            self.probation_counter = 5
+
+        # --- 2. Geometric Parallax Gate ---
+        median_parallax = 0.0
+
+        if len(self.keyframes) > 0 and len(self.lm_pts3d) > 0:
+            last_kf = self.keyframes[-1]
+            R_ref = last_kf["T_cw"][:3, :3]
+            t_ref = last_kf["T_cw"][:3, 3]
+            C_ref = -R_ref.T @ t_ref
             C_curr = self.T_wc[:3, 3]
 
-            lm_inliers = lm_pts3d[inliers.flatten()]
-            v_last = lm_inliers - C_last
-            v_curr = lm_inliers - C_curr
+            vecs_ref = self.lm_pts3d - C_ref
+            vecs_curr = self.lm_pts3d - C_curr
+            norms_ref = np.linalg.norm(vecs_ref, axis=1, keepdims=True)
+            norms_curr = np.linalg.norm(vecs_curr, axis=1, keepdims=True)
 
-            n_last = np.linalg.norm(v_last, axis=1, keepdims=True)
-            n_curr = np.linalg.norm(v_curr, axis=1, keepdims=True)
-            v_last = v_last / (n_last + 1e-8)
-            v_curr = v_curr / (n_curr + 1e-8)
+            valid = (norms_ref > 0.01) & (norms_curr > 0.01)
+            valid = valid.flatten()
 
-            dots = np.sum(v_last * v_curr, axis=1)
-            angles = np.degrees(np.arccos(np.clip(dots, -1.0, 1.0)))
-            median_parallax = np.median(angles) if len(angles) > 0 else 0.0
+            if np.sum(valid) > 0:
+                v_ref = vecs_ref[valid] / norms_ref[valid]
+                v_curr = vecs_curr[valid] / norms_curr[valid]
+                dots = np.sum(v_ref * v_curr, axis=1)
+                dots = np.clip(dots, -1.0, 1.0)
+                angles = np.degrees(np.arccos(dots))
+                median_parallax = np.median(angles)
 
-            rr.log("diagnostics/kf/parallax_deg", rr.Scalars(median_parallax))
+        rr.log("diagnostics/kf/median_parallax", rr.Scalars(median_parallax))
 
-            is_movement = median_parallax > 2.0
-            is_starving = inlier_count < 1000
+        # --- 3. Keyframe Decision & Survival Logic ---
 
-            # Strict Keyframe Addition to avoid Degeneracy
-            if is_movement or (is_starving and median_parallax > 1.0):
-                self._add_keyframe(
-                    lm_ids[inliers.flatten()], lm_pts2d[inliers.flatten()]
-                )
-                self.T_wc_last_kf = self.T_wc.copy()
+        has_parallax = median_parallax > 2.0
+        low_features = len(self.lm_pts3d) < (self.cfg.num_features * 0.3)
+        force_map = low_features and (median_parallax > 0.5)
+
+        need_kf = has_parallax or force_map
+
+        # --- SURVIVAL OVERRIDE ---
+        is_stable = self.probation_counter == 0
+
+        # If we have fewer than 200 points, we are about to die.
+        # Force mapping even if we are in probation.
+        is_starving = len(self.lm_pts3d) < 200
+
+        # Determine if we are allowed to triangulate/optimize
+        should_map = (is_stable or is_starving) and tracking_reliable
+
+        if need_kf and should_map:
+            self._add_keyframe()
+            self._triangulate_new_points()
+
+            # If we forced mapping due to starvation, skip BA this time
+            # (just add points to survive, don't stress the optimizer yet)
+            if not is_starving:
                 self._optimize_window()
+            else:
+                print("Survival Mode: Mapping forced, BA skipped.")
 
-            return True
-        else:
-            self.T_wc = T_guess
-            rr.log("diagnostics/pnp/status", rr.Scalars(0))  # 0 = coasting
-            return False
+            self.T_wc_last_kf = self.T_wc.copy()
 
-    def _process_triangulation(self, cand_ids, cand_pts2d):
-        """Triangulate surviving candidates"""
+            # Reset probation if we successfully mapped in survival mode
+            if is_starving:
+                self.probation_counter = 0
+
+        elif need_kf:
+            # We need a KF (moved enough), but we aren't allowed to map
+            # (Probation or Unreliable PnP).
+            # We MUST add the keyframe anyway to update the tracking reference!
+            self._add_keyframe()
+            print(
+                f"Skipping Map Update (Probation: {self.probation_counter}, Reliable: {tracking_reliable})"
+            )
+
+    def _add_keyframe(self):
+        """Stores current state as keyframe"""
+        kf = {
+            "T_cw": self.get_T_cw(),
+            "ids": self.lm_ids.copy(),
+            "pts_2d": self.lm_pts2d.copy(),
+        }
+        self.keyframes.append(kf)
+        if len(self.keyframes) > 7:  # Keep window small
+            self.keyframes.pop(0)
+
+    def _triangulate_new_points(self):
+        """
+        Uses candidates + current frame to find new 3D points.
+        Crucially, we rely on the backend filters (chirality, epipolar)
+        """
         T_cw_curr = self.get_T_cw()
-        rr.log("diagnostics/triangulation/candidates", rr.Scalars(len(cand_ids)))
 
-        new_pts_count = 0
-        angles = []
+        new_pts3d = []
+        new_pts2d = []
+        keep_mask = np.ones(len(self.cand_curr_2d), dtype=bool)
 
-        for i, cid in enumerate(cand_ids):
-            c_data = self.candidates[cid]
-            T_wc_first = c_data["first_pose"]
-            pt_first = c_data["first_pt"]
-            pt_curr = cand_pts2d[i]
+        for i in range(len(self.cand_curr_2d)):
+            T_wc_first = self.cand_first_pose_wc[i]
 
+            # Check baseline length
+            baseline = np.linalg.norm(self.T_wc[:3, 3] - T_wc_first[:3, 3])
+
+            # Don't even try if baseline is tiny (reduces compute)
+            if baseline < 0.15:
+                continue
+
+            # Invert T_wc_first -> T_cw_first
             R_f = T_wc_first[:3, :3]
             t_f = T_wc_first[:3, 3]
             T_cw_first = np.eye(4)
             T_cw_first[:3, :3] = R_f.T
             T_cw_first[:3, 3] = -R_f.T @ t_f
 
-            pts3d, mask, stats = triangulate_and_filter(
+            # Triangulate
+            pt3d, mask, stats = triangulate_and_filter(
                 T_cw_first,
                 T_cw_curr,
-                np.array([pt_first]),
-                np.array([pt_curr]),
+                self.cand_first_2d[i : i + 1],
+                self.cand_curr_2d[i : i + 1],
                 self.K,
                 self.cfg,
             )
+            rr.log("diagnostics/backend/avg_angle", rr.Scalars(stats["avg_angle"]))
 
             if mask[0]:
-                new_id = self.next_pt_id
-                self.next_pt_id += 1
-                self.map_points[new_id] = pts3d[0]
-                del self.candidates[cid]
-                self.promoted_cids[cid] = new_id
-                new_pts_count += 1
-                angles.append(stats["avg_angle"])
+                new_pts3d.append(pt3d[0])
+                new_pts2d.append(self.cand_curr_2d[i])
+                keep_mask[i] = False  # Remove from candidates (promoted)
 
-        rr.log("diagnostics/triangulation/new_points", rr.Scalars(new_pts_count))
-        if len(angles) > 0:
-            rr.log("diagnostics/triangulation/avg_angle", rr.Scalars(np.mean(angles)))
+        # Update Main Lists
+        if len(new_pts3d) > 0:
+            num_new = len(new_pts3d)
+            new_ids = np.arange(self.next_pt_id, self.next_pt_id + num_new)
+            self.next_pt_id += num_new
 
-    def _process_initialization(self, cand_ids, cand_pts2d):
-        if len(cand_ids) < 50:
-            return
+            self.lm_pts3d = np.vstack((self.lm_pts3d, np.array(new_pts3d)))
+            self.lm_pts2d = np.vstack((self.lm_pts2d, np.array(new_pts2d)))
+            self.lm_ids = np.concatenate((self.lm_ids, new_ids))
+            # NEW: Init prev points for these new ones to avoid shape mismatch next frame
+            # FIX: Robust prev update
+            new_pts2d_arr = np.array(new_pts2d)
+            if len(self.prev_lm_pts2d) == len(self.lm_pts2d) - num_new:
+                self.prev_lm_pts2d = np.vstack((self.prev_lm_pts2d, new_pts2d_arr))
+            else:
+                # If sizes don't match logic, rebuild prev from current (minus new)
+                # This is tricky, easier to just reset prev to current for next frame
+                self.prev_lm_pts2d = self.lm_pts2d.copy()
 
-        pts1, pts2, used_cids = [], [], []
-        anchor_T_wc = self.candidates[cand_ids[0]]["first_pose"]
+            print(f"Triangulated {num_new} new points.")
 
-        for i, cid in enumerate(cand_ids):
-            pts1.append(self.candidates[cid]["first_pt"])
-            pts2.append(cand_pts2d[i])
-            used_cids.append(cid)
-
-        pts1 = np.array(pts1)
-        pts2 = np.array(pts2)
-
-        disp = np.linalg.norm(pts1 - pts2, axis=1)
-        avg_disp = np.mean(disp)
-        rr.log("diagnostics/init/avg_disp", rr.Scalars(avg_disp))
-
-        if avg_disp < self.cfg.init_min_parallax:
-            return
-
-        E, mask = cv2.findEssentialMat(
-            pts1, pts2, self.K, method=cv2.RANSAC, prob=0.999, threshold=1.0
-        )
-        if E is None:
-            return
-
-        _, R, t, _ = cv2.recoverPose(E, pts1, pts2, self.K)
-
-        # T_rel is the motion from View 1 (Anchor) to View 2 (Current)
-        # BUT: recoverPose gives R,t such that x2 = R*x1 + t
-        # This means T_c2_c1 (motion of points 1->2).
-        # We want the World Pose of 2.
-        # T_w2 = T_w1 * T_12
-        # T_12 = T_c2_c1^-1
-
-        T_rel_points = np.eye(4)
-        T_rel_points[:3, :3] = R
-        T_rel_points[:3, 3] = t.flatten()
-
-        T_c2_c1 = T_rel_points
-        T_c1_c2 = np.linalg.inv(T_c2_c1)
-
-        # Apply to Anchor
-        # self.T_wc = anchor_T_wc @ T_c1_c2
-
-        # Note: T_wc is the CAMERA POSE in WORLD Frame.
-        # T_wc_curr = T_wc_prev * T_prev_curr
-        # recoverPose gives R,t.
-        # R, t correspond to T_c2_c1.
-        # So T_c1_c2 = inv(T_c2_c1).
-        # T_w_c2 = T_w_c1 * T_c1_c2.
-
-        self.T_wc = anchor_T_wc @ T_c1_c2
-
-        # Triangulate
-        T_cw_curr = self.get_T_cw()
-
-        # Anchor Camera Pose (inverse of Anchor World Pose)
-        R_a = anchor_T_wc[:3, :3]
-        t_a = anchor_T_wc[:3, 3]
-        T_cw_anchor = np.eye(4)
-        T_cw_anchor[:3, :3] = R_a.T
-        T_cw_anchor[:3, 3] = -R_a.T @ t_a
-
-        pts3d, mask_tri, _ = triangulate_and_filter(
-            T_cw_anchor, T_cw_curr, pts1, pts2, self.K, self.cfg
-        )
-
-        cnt = 0
-        for i, is_valid in enumerate(mask_tri):
-            if is_valid:
-                new_id = self.next_pt_id
-                self.next_pt_id += 1
-                self.map_points[new_id] = pts3d[cnt]
-                self.promoted_cids[used_cids[i]] = new_id
-                del self.candidates[used_cids[i]]
-                cnt += 1
-
-        print(f"Re-Initialized with {cnt} points (Continued Trajectory)")
-        self.state = "TRACKING"
-        self._add_keyframe([], [])
-        self.T_wc_last_kf = self.T_wc.copy()
-
-    def _add_keyframe(self, active_ids, active_pts):
-        kf = {
-            "T_cw": self.get_T_cw(),
-            "ids": active_ids,
-            "pts_2d": active_pts,
-        }
-        self.keyframes.append(kf)
-        if len(self.keyframes) > 7:
-            self.keyframes.pop(0)
+        # Clean candidates
+        self.cand_curr_2d = self.cand_curr_2d[keep_mask]
+        self.cand_first_2d = self.cand_first_2d[keep_mask]
+        self.cand_first_pose_wc = [
+            self.cand_first_pose_wc[k] for k in range(len(keep_mask)) if keep_mask[k]
+        ]
 
     def _optimize_window(self):
+        """Wrapper for Bundle Adjustment with ADAPTIVE FEEDBACK LOOP."""
         if not self.cfg.enable_window_ba or len(self.keyframes) < 3:
             return
 
-        rr.log("diagnostics/ba/map_size_pre", rr.Scalars(len(self.map_points)))
+        # Prepare Map Dictionary
+        for i, pt_id in enumerate(self.lm_ids):
+            self.map_points[pt_id] = self.lm_pts3d[i]
 
-        self.keyframes, self.map_points, pruned = bundle_adjustment_window(
-            self.keyframes, self.map_points, self.K
-        )
+        total_points_before = len(self.map_points)
 
-        rr.log("diagnostics/ba/pruned", rr.Scalars(pruned))
-        rr.log("diagnostics/ba/map_size_post", rr.Scalars(len(self.map_points)))
+        try:
+            # UNPACK 3 VALUES
+            self.keyframes, self.map_points, num_pruned = bundle_adjustment_window(
+                self.keyframes, self.map_points, self.K, fixed_window_size=True
+            )
 
-    def _log_state(self, img, flow_lines, active_pts):
+            # feedback loop
+            if total_points_before > 0:
+                prune_ratio = num_pruned / total_points_before
+            else:
+                prune_ratio = 0.0
+
+            if prune_ratio > 0.20 and num_pruned > 50:
+                print(
+                    f"WARNING: BA instability detected. Pruned {num_pruned} pts ({prune_ratio * 100:.1f}%)."
+                )
+                self.probation_counter = max(self.probation_counter, 3)
+
+            # Update Current State
+            latest_kf = self.keyframes[-1]
+            T_cw_opt = latest_kf["T_cw"]
+            R_opt = T_cw_opt[:3, :3]
+            t_opt = T_cw_opt[:3, 3]
+
+            self.T_wc[:3, :3] = R_opt.T
+            self.T_wc[:3, 3] = -R_opt.T @ t_opt
+
+            # Update 3D points in array from Map
+            # (Only update those that survived)
+            for i, pt_id in enumerate(self.lm_ids):
+                if pt_id in self.map_points:
+                    self.lm_pts3d[i] = self.map_points[pt_id]
+
+            # sync arrays
+            keep_mask = []
+            for pt_id in self.lm_ids:
+                keep_mask.append(pt_id in self.map_points)
+            keep_mask = np.array(keep_mask, dtype=bool)
+
+            # SAFETY CHECK: Ensure arrays are aligned before filtering
+            if len(self.lm_pts3d) != len(keep_mask):
+                print(
+                    f"CRITICAL DESYNC: pts3d={len(self.lm_pts3d)}, ids={len(self.lm_ids)}"
+                )
+                # Emergency Force-Sync: Truncate to smaller size to prevent crash
+                min_len = min(len(self.lm_pts3d), len(keep_mask))
+                self.lm_pts3d = self.lm_pts3d[:min_len]
+                keep_mask = keep_mask[:min_len]
+
+            if np.sum(keep_mask) < len(self.lm_ids):
+                # print(f"Syncing: Dropping {len(self.lm_ids) - np.sum(keep_mask)} points")
+                self.lm_pts3d = self.lm_pts3d[keep_mask]
+                self.lm_pts2d = self.lm_pts2d[keep_mask]
+
+                # FIX: Sync prev_pts if it exists and matches size
+                if len(self.prev_lm_pts2d) == len(keep_mask):
+                    self.prev_lm_pts2d = self.prev_lm_pts2d[keep_mask]
+                elif len(self.prev_lm_pts2d) > 0:
+                    # If sizes mismatch, just reset it to current (safe fallback)
+                    self.prev_lm_pts2d = self.lm_pts2d.copy()
+
+                self.lm_ids = self.lm_ids[keep_mask]
+
+        except Exception as e:
+            print(f"BA Failed: {e}")
+
+    def _replenish_features(self, img: np.ndarray):
+        """Finds new candidates in image"""
+        if len(self.cand_curr_2d) + len(self.lm_pts2d) < self.cfg.num_features:
+            # Mask out existing points
+            mask = np.full(img.shape, 255, dtype=np.uint8)
+
+            for pt in self.lm_pts2d:
+                cv2.circle(mask, tuple(pt.astype(int)), self.cfg.min_distance, 0, -1)
+            for pt in self.cand_curr_2d:
+                cv2.circle(mask, tuple(pt.astype(int)), self.cfg.min_distance, 0, -1)
+
+            new_pts = detect_new_features(img, mask, self.cfg)
+
+            if len(new_pts) > 0:
+                self.cand_curr_2d = (
+                    np.vstack((self.cand_curr_2d, new_pts))
+                    if len(self.cand_curr_2d)
+                    else new_pts
+                )
+                self.cand_first_2d = (
+                    np.vstack((self.cand_first_2d, new_pts))
+                    if len(self.cand_first_2d)
+                    else new_pts
+                )
+                # Store Pose
+                curr_pose = self.T_wc.copy()
+                self.cand_first_pose_wc.extend([curr_pose] * len(new_pts))
+
+    def _log_state(self, img: np.ndarray):
+        """Visualization Logic"""
         rr.set_time_sequence("frame", self.frame_id)
 
+        # Camera
         rr.log(
             "world/camera",
             rr.Transform3D(translation=self.T_wc[:3, 3], mat3x3=self.T_wc[:3, :3]),
         )
 
+        # Image
         rr.log(
             "world/camera/image",
             rr.Pinhole(
@@ -436,18 +596,7 @@ class VisualOdometry:
         )
         rr.log("world/camera/image", rr.Image(img))
 
-        if len(flow_lines) > 0:
-            rr.log(
-                "world/camera/image/flow",
-                rr.LineStrips2D(flow_lines, radii=0.5, colors=[0, 255, 255]),
-            )
-
-        if len(active_pts) > 0:
-            rr.log(
-                "world/camera/image/landmarks",
-                rr.Points2D(active_pts, colors=[0, 255, 0], radii=3),
-            )
-
+        # Trajectory
         self.trajectory_points.append(self.T_wc[:3, 3])
         if len(self.trajectory_points) > 1:
             rr.log(
@@ -455,6 +604,22 @@ class VisualOdometry:
                 rr.LineStrips3D([self.trajectory_points], colors=[[0, 255, 255]]),
             )
 
-        if len(self.map_points) > 0:
-            pts = np.array(list(self.map_points.values()))
-            rr.log("world/landmarks", rr.Points3D(pts, colors=[0, 255, 0]))
+        # Points
+        if self.cfg.viz_3d_landmarks and len(self.lm_pts3d) > 0:
+            rr.log("world/landmarks", rr.Points3D(self.lm_pts3d, colors=[0, 255, 0]))
+
+            # Reprojection 2D
+            T_cw = self.get_T_cw()
+            reproj, _ = cv2.projectPoints(
+                self.lm_pts3d, T_cw[:3, :3], T_cw[:3, 3], self.K, None
+            )
+            rr.log(
+                "world/camera/image/landmarks",
+                rr.Points2D(reproj.reshape(-1, 2), colors=[0, 255, 0], radii=2),
+            )
+
+        if self.cfg.viz_2d_candidates and len(self.cand_curr_2d) > 0:
+            rr.log(
+                "world/camera/image/candidates",
+                rr.Points2D(self.cand_curr_2d, colors=[255, 0, 0], radii=2),
+            )
