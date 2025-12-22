@@ -3,33 +3,6 @@ import numpy as np
 from config.config import VOConfig
 
 
-def detect_features(
-    img: np.ndarray, config: VOConfig, mask: np.ndarray | None = None
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Detects SIFT features and computes descriptors.
-
-    Args:
-        img: Grayscale image.
-        config: VO configuration.
-        mask: Optional mask (255 = keep, 0 = ignore) for sky/car hood.
-
-    Returns:
-        Tuple of (keypoints_2d_array, descriptors).
-    """
-    # create sift detector
-    sift = cv2.SIFT_create(
-        nfeatures=config.num_features,
-        contrastThreshold=config.sift_contrast_thresh,
-        edgeThreshold=config.sift_edge_thresh,
-    )
-
-
-import cv2
-import numpy as np
-from config.config import VOConfig
-
-
 def detect_new_features(
     img: np.ndarray, mask: np.ndarray | None, config: VOConfig
 ) -> np.ndarray:
@@ -91,7 +64,7 @@ def detect_new_features(
                 qualityLevel=current_quality,
                 minDistance=config.min_distance,
                 blockSize=config.block_size,
-                useHarrisDetector=False,
+                useHarrisDetector=True,
                 k=0.04,
             )
 
@@ -155,7 +128,7 @@ def track_optical_flow(
             back_guess,  # use original points as guess
             winSize=config.lk_win_size,
             maxLevel=config.lk_max_level,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 0.03),
             flags=flags_back,
         )
 
