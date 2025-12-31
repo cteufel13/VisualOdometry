@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+
 from config.config import VOConfig
 
 
@@ -73,8 +74,7 @@ def detect_new_features(
 
     if len(all_keypoints) > 0:
         return np.vstack(all_keypoints)
-    else:
-        return np.empty((0, 2))
+    return np.empty((0, 2))
 
 
 def track_optical_flow(
@@ -142,9 +142,8 @@ def track_optical_flow(
             & (fb_dist < config.fb_error_thresh)
         )
         return pts2, valid
-    else:
-        valid = status.flatten() == 1
-        return pts2, valid
+    valid = status.flatten() == 1
+    return pts2, valid
 
 
 def triangulate_and_filter(
@@ -168,6 +167,7 @@ def triangulate_and_filter(
 
     Returns:
         Tuple of 3D points (N, 3), validity mask (N,), and stats dict.
+
     """
     # 1. triangulate
     P1 = K @ T_cw1[:3, :]
@@ -305,6 +305,7 @@ def match_features(
     Returns:
         Tuple (matches_indices_prev, matches_indices_curr).
         These arrays are aligned: prev[i] matches curr[i].
+
     """
     if len(des_prev) == 0 or len(des_curr) == 0:
         return np.empty(0, dtype=int), np.empty(0, dtype=int)

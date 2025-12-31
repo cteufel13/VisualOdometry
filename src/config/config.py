@@ -56,19 +56,20 @@ def get_config(dataset: str) -> VOConfig:
     cfg = VOConfig()
 
     if dataset == "kitti":
-        cfg.quality_level = 0.001
-        cfg.min_distance = 8
-        cfg.block_size = 5
-        cfg.init_min_parallax = 50.0
         cfg.init_frame_step = 3
+        cfg.quality_level = 0.001
+        cfg.block_size = 4
         cfg.num_features = 3000
-        cfg.max_reproj_err = 9.0
-        cfg.pnp_ransac_iter = 100
+        cfg.max_reproj_err = 15.0
+        cfg.init_min_parallax = 30.0
         cfg.min_ray_angle_deg = 0.5
-        cfg.pnp_min_inliers = 5
-        cfg.lk_win_size = (31, 31)
+        cfg.pnp_min_inliers = 10
         cfg.lk_max_level = 5
-        cfg.sky_percentage = 0.2
+        cfg.grid_rows = 6
+        cfg.grid_cols = 4
+        cfg.lk_win_size = (21, 21)
+        cfg.min_distance = 7
+        cfg.sky_percentage = 0.1
 
     elif dataset == "malaga":
         cfg.init_frame_step = 3
