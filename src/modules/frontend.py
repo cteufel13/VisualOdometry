@@ -139,7 +139,7 @@ def triangulate_points(
     proj_pts2, _ = cv2.projectPoints(pts3d, R2, t2, K, None)
     err2 = np.linalg.norm(proj_pts2.reshape(-1, 2) - pts2, axis=1)
 
-    # use relaxed error threshold from config
+    # use error threshold from config
     mask_reproj = err2 < (config.max_reproj_err)
 
     # combine masks

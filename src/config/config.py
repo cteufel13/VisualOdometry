@@ -6,7 +6,7 @@ class VOConfig:
     """Configuration data class for the VO pipeline."""
 
     # extractor selection
-    extractor_type: str = "superpoint"  # superpoint or sift
+    extractor_type: str = "sift"  # superpoint or sift
 
     # global scaling
     global_scale: float = 50.0
@@ -30,7 +30,6 @@ class VOConfig:
     # triangulation & depth
     min_depth: float = 0.001
     max_reproj_err: float = 6.0
-    reproj_err_relax: float = 1.5  # multiplier for relaxed check
 
     # pnp and tracking
     pnp_reproj_err: float = 4.0
