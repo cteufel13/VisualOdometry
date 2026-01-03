@@ -6,7 +6,7 @@ class VOConfig:
     """Configuration data class for the VO pipeline."""
 
     # extractor selection
-    extractor_type: str = "sift"  # superpoint or sift
+    extractor_type: str = "superpoint"  # superpoint or sift
 
     # global scaling
     global_scale: float = 50.0
@@ -85,6 +85,7 @@ def get_config(dataset: str) -> VOConfig:
             cfg.sift_n_features = 3000
             cfg.sift_contrast_threshold = 0.01
             cfg.sift_edge_threshold = 2.0
+            cfg.max_reproj_err = 10.0
             cfg.min_parallax = 4.0
 
     elif dataset == "parking":
