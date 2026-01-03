@@ -164,13 +164,6 @@ class VisualOdometry:
                             ) + ((1 - self.cfg.trans_smoothing) * raw_speed)
                             scale_factor = target_speed / raw_speed
 
-                            # update baseline (slow learning)
-                            # check if new speed is gucci before learning
-                            # ratio = raw_speed / self.baseline_speed
-                            # if 0.9 < ratio < 1.5:
-                            #     self.baseline_speed = (
-                            #         (1 - self.cfg.baseline_lr) * self.baseline_speed
-                            #     ) + (self.cfg.baseline_lr * raw_speed)
                             self.baseline_speed = (
                                 (1 - self.cfg.baseline_lr) * self.baseline_speed
                             ) + (self.cfg.baseline_lr * raw_speed)
