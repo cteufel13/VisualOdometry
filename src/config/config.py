@@ -20,7 +20,7 @@ class VOConfig:
 
     # triangulation & depth
     min_depth: float = 0.001
-    max_reproj_err: float = 3.0
+    max_reproj_err: float = 6.0
     reproj_err_relax: float = 1.5  # multiplier for relaxed check
 
     # pnp and tracking
@@ -45,23 +45,23 @@ def get_config(dataset: str) -> VOConfig:
     """Get config based on dataset."""
     cfg = VOConfig()
     if dataset == "kitti":
-        cfg.min_parallax = 10.0
+        cfg.min_parallax = 40.0
         cfg.max_keypoints = 2048
-        cfg.max_reproj_err = 2.0
-        cfg.pnp_reproj_err = 2.0
-        cfg.baseline_lr = 0.001
+        cfg.max_reproj_err = 5.0
+        cfg.pnp_reproj_err = 1.0
+        cfg.baseline_lr = 0.01
         cfg.turn_smoothing = 0.2
         cfg.trans_smoothing = 0.2
     elif dataset == "malaga":
         cfg.min_parallax = 30.0
         cfg.max_keypoints = 2048
-        cfg.max_reproj_err = 2.0
+        cfg.max_reproj_err = 5.0
         cfg.pnp_reproj_err = 2.0
-        cfg.baseline_lr = 0.005
-        cfg.turn_smoothing = 0.2
-        cfg.trans_smoothing = 0.2
+        cfg.baseline_lr = 0.01
+        cfg.turn_smoothing = 0.95
+        cfg.trans_smoothing = 0.1
     elif dataset == "parking":
-        cfg.min_parallax = 5.0
-        cfg.max_reproj_err = 1.0
+        cfg.min_parallax = 3.0
+        cfg.max_reproj_err = 2.0
         cfg.pnp_reproj_err = 1.0
     return cfg
