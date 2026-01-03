@@ -3,102 +3,65 @@ from dataclasses import dataclass
 
 @dataclass
 class VOConfig:
-    """Configuration data class for the visual odometry pipeline."""
+    """Configuration data class for the LightGlue VO pipeline."""
 
-    # feature management
-    num_features: int = 2000
-    quality_level: float = 0.01
-    min_distance: int = 10
-    block_size: int = 7
-    grid_rows: int = 4
-    grid_cols: int = 6
+    # global scaling
+    global_scale: float = 50.0
 
-    # tracking
-    enable_fb_tracking: bool = False  # forward-backward check
-    fb_error_thresh: float = 1.0  # max drift in pixels
+    # feature extractor
+    max_keypoints: int = 2048
+    device: str = "cuda"
 
-    # initialization
-    init_min_parallax: float = 20.0
-    init_frame_step: int = 3  # frames to skip for init
+    # initialization & keyframes
+    min_parallax: float = 20.0
+    min_inliers: int = 10
+    init_ransac_prob: float = 0.999
+    init_ransac_thresh: float = 1.0
 
-    # triangulation
-    min_ray_angle_deg: float = 1.0
-    max_reproj_err: float = 2.0
+    # triangulation & depth
+    min_depth: float = 0.001
+    max_reproj_err: float = 3.0
+    reproj_err_relax: float = 1.5  # multiplier for relaxed check
 
-    # pose estimation
-    pnp_min_inliers: int = 10
-    pnp_ransac_iter: int = 100
+    # pnp and tracking
+    pnp_reproj_err: float = 4.0
+    kf_min_tracked: int = 80
 
-    # visualization
-    viz_2d_candidates: bool = True
-    viz_3d_landmarks: bool = True
+    # speed logic
+    init_speed_min: float = 0.1
+    init_speed_max: float = 5.0
+    turn_thresh: float = 0.01  # rad
+    move_thresh: float = 0.01
+    turn_smoothing: float = 0.7
+    trans_smoothing: float = 0.6
+    baseline_lr: float = 0.01
 
-    # optical flow
-    lk_win_size: tuple[int, int] = (21, 21)
-    lk_max_level: int = 3
-    enable_window_ba: bool = False
-
-    # sky mask
-    sky_percentage = 0.0
+    # smoothing limits
+    scale_clamp_min: float = 0.5
+    scale_clamp_max: float = 3.0
 
 
 def get_config(dataset: str) -> VOConfig:
-    """
-    Return the specific configuration for a dataset.
-
-    Args:
-        dataset: Name of the dataset (kitti, malaga, parking).
-
-    Returns:
-        The configuration object with dataset-specific overrides.
-
-    """
+    """Get config based on dataset."""
     cfg = VOConfig()
-
     if dataset == "kitti":
-        cfg.init_frame_step = 3
-        cfg.quality_level = 0.001
-        cfg.block_size = 4
-        cfg.num_features = 3000
-        cfg.max_reproj_err = 15.0
-        cfg.init_min_parallax = 30.0
-        cfg.min_ray_angle_deg = 0.5
-        cfg.pnp_min_inliers = 10
-        cfg.lk_max_level = 5
-        cfg.grid_rows = 6
-        cfg.grid_cols = 4
-        cfg.lk_win_size = (21, 21)
-        cfg.min_distance = 7
-        cfg.sky_percentage = 0.1
-
+        cfg.min_parallax = 10.0
+        cfg.max_keypoints = 2048
+        cfg.max_reproj_err = 2.0
+        cfg.pnp_reproj_err = 2.0
+        cfg.baseline_lr = 0.001
+        cfg.turn_smoothing = 0.2
+        cfg.trans_smoothing = 0.2
     elif dataset == "malaga":
-        cfg.init_frame_step = 3
-        cfg.min_distance = 1
-        cfg.quality_level = 0.001
-        cfg.block_size = 4
-        cfg.num_features = 3000
-        cfg.max_reproj_err = 15.0
-        cfg.init_min_parallax = 30.0
-        cfg.min_ray_angle_deg = 0.5
-        cfg.pnp_min_inliers = 10
-        cfg.lk_max_level = 5
-        cfg.grid_rows = 6
-        cfg.grid_cols = 4
-        cfg.lk_win_size = (21, 21)
-        cfg.min_distance = 7
-        cfg.sky_percentage = 0.55
-
+        cfg.min_parallax = 30.0
+        cfg.max_keypoints = 2048
+        cfg.max_reproj_err = 2.0
+        cfg.pnp_reproj_err = 2.0
+        cfg.baseline_lr = 0.005
+        cfg.turn_smoothing = 0.2
+        cfg.trans_smoothing = 0.2
     elif dataset == "parking":
-        cfg.quality_level = 0.005
-        cfg.init_min_parallax = 30.0
-        cfg.init_frame_step = 3
-        cfg.min_distance = 1
-        cfg.block_size = 6
-        cfg.num_features = 2500
-        cfg.min_ray_angle_deg = 2.5
-        cfg.max_reproj_err = 4.0
-        cfg.min_ray_angle_deg = 3.0
-        cfg.lk_win_size = (11, 11)
-        cfg.block_size = 5
-
+        cfg.min_parallax = 5.0
+        cfg.max_reproj_err = 1.0
+        cfg.pnp_reproj_err = 1.0
     return cfg
