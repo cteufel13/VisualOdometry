@@ -67,7 +67,7 @@ def triangulate_points(
     err2 = np.linalg.norm(proj_pts2.reshape(-1, 2) - pts2, axis=1)
 
     # use relaxed error threshold from config
-    mask_reproj = err2 < (config.max_reproj_err * config.reproj_err_relax)
+    mask_reproj = err2 < (config.max_reproj_err)
 
     # combine masks
     final_mask = mask_pos_depth & mask_reproj
