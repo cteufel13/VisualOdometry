@@ -3,6 +3,7 @@ name = "visual-odometry"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "lightglue",
     "numpy>=2.2.6",
     "opencv-python>=4.12.0.88",
     # uv add <package> will automatically add here
@@ -11,6 +12,8 @@ dependencies = [
     "pycolmap>=3.13.0",
     "rerun-sdk>=0.27.2",
     "scipy>=1.16.3",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
     "tyro>=0.9.35",
 ]
 
@@ -124,3 +127,6 @@ fixable = ["ALL"]
 [tool.ruff.format]
 exclude = ["Q000", "D212"]
 skip-magic-trailing-comma = false
+
+[tool.uv.sources]
+lightglue = { git = "https://github.com/cvg/LightGlue.git" }
