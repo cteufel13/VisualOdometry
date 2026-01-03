@@ -47,15 +47,10 @@ python src/main.py -h
 **Common Examples:**
 
 ```bash
-# Run with default settings (KITTI sequence 05, Rerun visualization)
+# Run with default settings (KITTI sequence 05)
 python src/main.py
-
-# Run with cv2 visualization instead of Rerun
-python src/main.py --cv2_viz
 
 # Run on a different dataset
 python src/main.py --dataset parking
 
-# Run KITTI with a specific sequence
-python src/main.py --dataset kitti --sequence 06
 ```
