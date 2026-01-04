@@ -32,6 +32,20 @@ class VisualOdometry:
         rr.init("LightGlue VO", spawn=True)
         rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
+    def _prune_map(self) -> None:
+        """Remove old points to keep dictionary size constant."""
+        # max map points to store
+        max_points = 20000
+
+        # smaller ids are older points
+        threshold_id = self.next_pt_id - max_points
+
+        # collect keys first
+        to_remove = [pid for pid in self.map_points if pid < threshold_id]
+
+        for pid in to_remove:
+            del self.map_points[pid]
+
     def process_frame(self, img: np.ndarray) -> None:
         """Process incoming image frame."""
         curr_feats = self.frontend.process_image(img)
@@ -107,7 +121,12 @@ class VisualOdometry:
         # tracking
         else:
             kf_ids = self.keyframe["ids"][ref_indices]
-            valid_mask = np.array([pid != -1 for pid in kf_ids])
+            valid_mask = np.array(
+                [(pid != -1 and pid in self.map_points) for pid in kf_ids]
+            )
+
+            if np.sum(valid_mask) > self.cfg.min_inliers:
+                pnp_3d = np.array([self.map_points[pid] for pid in kf_ids[valid_mask]])
 
             if np.sum(valid_mask) > self.cfg.min_inliers:
                 pnp_3d = np.array([self.map_points[pid] for pid in kf_ids[valid_mask]])
@@ -267,6 +286,8 @@ class VisualOdometry:
                     count += 1
 
         self.keyframe = {"feats": curr_feats, "ids": curr_ids, "T_wc": self.T_wc.copy()}
+
+        self._prune_map()
 
     def _reset_system(self) -> None:
         """Reset VO state on failure."""
