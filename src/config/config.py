@@ -100,10 +100,8 @@ def get_config(dataset: str) -> VOConfig:
             cfg.min_median_flow = 4.0
 
     elif dataset == "own":
-        cfg.init_speed_min = 0.1
-        cfg.init_speed_max = 2.0
-        cfg.baseline_lr = 0.0001
-        cfg.turn_smoothing = 0.95
-        cfg.trans_smoothing = 0.99
+        cfg.baseline_lr = 0.001
+        cfg.turn_smoothing = 0.2
+        cfg.trans_smoothing = 0.6
 
     return cfg
