@@ -148,7 +148,7 @@ class ParkingDataset(BaseDataset):
 
 
 class OwnDataset(BaseDataset):
-    """Loader for custom user datasets."""
+    """Loader for the custom dataset."""
 
     def __init__(self, base_path: Path) -> None:
         """
@@ -159,16 +159,37 @@ class OwnDataset(BaseDataset):
 
         """
         super().__init__(base_path)
-        self.own_base = self.base_path / "my_dataset"
+        self.custom_base = self.base_path / "my_dataset"
         self.load()
 
     def load(self) -> None:
-        """Load K and Image paths for the custom dataset."""
-        print("WARNING: OwnDataset K matrix is not set up.")
-        self.K = np.eye(3)  # placeholder
+        """Load K, Ground Truth, and Image paths for custom dataset."""
+        # load K from text file
+        k_path = self.custom_base / "K.txt"
+        self.K = self._load_custom_k(k_path)
 
-        self.ground_truth = None
+        # load ground truth poses
+        pose_path = self.custom_base / "poses.txt"
+        if pose_path.exists():
+            poses = np.loadtxt(pose_path)
+            self.ground_truth = poses[:, [3, 11]]
 
-        img_dir = self.own_base / "images"
+        # Get image files
+        img_dir = self.custom_base / "images"
         self.image_files = sorted(img_dir.glob("*.png"))
-        print(f"Loaded {len(self.image_files)} image paths from Own Dataset")
+        print(f"Loaded {len(self.image_files)} image paths from own dataset")
+
+    def _load_custom_k(self, k_path: Path) -> np.ndarray:
+        """
+        Parse the K matrix from the specific text format of the own dataset.
+
+        Args:
+            k_path: Path to the K.txt file.
+
+        Returns:
+            3x3 Intrinsic Matrix as a numpy array.
+
+        """
+        with Path.open(k_path) as f:
+            cleaned_text = f.read().replace(",", " ").strip()
+        return np.loadtxt(io.StringIO(cleaned_text), dtype=np.float64)
