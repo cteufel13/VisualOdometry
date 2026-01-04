@@ -22,7 +22,7 @@ class VOConfig:
     sift_sigma: float = 1.6
 
     # initialization & keyframes
-    min_parallax: float = 20.0
+    min_median_flow: float = 20.0
     min_inliers: int = 10
     init_ransac_prob: float = 0.999
     init_ransac_thresh: float = 1.0
@@ -54,7 +54,7 @@ def get_config(dataset: str) -> VOConfig:
     cfg = VOConfig()
     # tuning
     if dataset == "kitti":
-        cfg.min_parallax = 40.0
+        cfg.min_median_flow = 40.0
         cfg.max_keypoints = 2048
         cfg.max_reproj_err = 5.0
         cfg.pnp_reproj_err = 1.0
@@ -73,7 +73,7 @@ def get_config(dataset: str) -> VOConfig:
             cfg.trans_smoothing = 0.4
 
     elif dataset == "malaga":
-        cfg.min_parallax = 30.0
+        cfg.min_median_flow = 30.0
         cfg.max_keypoints = 2048
         cfg.max_reproj_err = 5.0
         cfg.pnp_reproj_err = 2.0
@@ -86,10 +86,10 @@ def get_config(dataset: str) -> VOConfig:
             cfg.sift_contrast_threshold = 0.01
             cfg.sift_edge_threshold = 2.0
             cfg.max_reproj_err = 10.0
-            cfg.min_parallax = 4.0
+            cfg.min_median_flow = 4.0
 
     elif dataset == "parking":
-        cfg.min_parallax = 3.0
+        cfg.min_median_flow = 3.0
         cfg.max_reproj_err = 2.0
         cfg.pnp_reproj_err = 1.0
 
@@ -97,6 +97,13 @@ def get_config(dataset: str) -> VOConfig:
             cfg.sift_n_features = 3000
             cfg.sift_contrast_threshold = 0.01
             cfg.sift_edge_threshold = 2.0
-            cfg.min_parallax = 4.0
+            cfg.min_median_flow = 4.0
+
+    elif dataset == "own":
+        cfg.init_speed_min = 0.1
+        cfg.init_speed_max = 2.0
+        cfg.baseline_lr = 0.0001
+        cfg.turn_smoothing = 0.95
+        cfg.trans_smoothing = 0.99
 
     return cfg

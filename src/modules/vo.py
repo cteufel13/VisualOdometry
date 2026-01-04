@@ -72,13 +72,13 @@ class VisualOdometry:
             uv_ref = prev_kf_feats["keypoints"][0].cpu().numpy()[ref_indices]
             uv_curr = curr_feats["keypoints"][0].cpu().numpy()[curr_indices]
 
-            parallax = 0.0
+            median_flow = 0.0
             if len(uv_ref) > 0:
-                parallax = np.median(np.linalg.norm(uv_ref - uv_curr, axis=1))
+                median_flow = np.median(np.linalg.norm(uv_ref - uv_curr, axis=1))
 
-            if parallax < self.cfg.min_parallax:
+            if median_flow < self.cfg.min_median_flow:
                 print(
-                    f"Frame {self.frame_id}: Waiting for motion (Parallax {parallax:.1f})..."
+                    f"Frame {self.frame_id}: Waiting for motion (median_flow {median_flow:.1f})..."
                 )
                 self._visualize(curr_feats, curr_ids, matches, prev_kf_feats, img, 0.0)
                 self.frame_id += 1
@@ -216,13 +216,13 @@ class VisualOdometry:
                     # kf decision
                     uv_ref = prev_kf_feats["keypoints"][0].cpu().numpy()[ref_indices]
                     uv_curr = curr_feats["keypoints"][0].cpu().numpy()[curr_indices]
-                    parallax = np.median(np.linalg.norm(uv_ref - uv_curr, axis=1))
+                    median_flow = np.median(np.linalg.norm(uv_ref - uv_curr, axis=1))
 
                     is_keyframe = False
                     reason = ""
-                    if parallax > self.cfg.min_parallax:
+                    if median_flow > self.cfg.min_median_flow:
                         is_keyframe = True
-                        reason = "Parallax"
+                        reason = "Median Flow"
                     elif num_tracked < self.cfg.kf_min_tracked:
                         is_keyframe = True
                         reason = "Low Tracking"
@@ -236,7 +236,7 @@ class VisualOdometry:
                         )
                     else:
                         print(
-                            f"Frame {self.frame_id}: Tracking... (Parallax {parallax:.1f})"
+                            f"Frame {self.frame_id}: Tracking... (Median Flow {median_flow:.1f})"
                         )
 
                 else:
