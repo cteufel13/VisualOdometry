@@ -74,9 +74,9 @@ def get_config(dataset: str) -> VOConfig:
         cfg.max_keypoints = 2048
         cfg.max_reproj_err = 5.0
         cfg.pnp_reproj_err = 2.0
-        cfg.baseline_lr = 0.01
-        cfg.turn_smoothing = 0.95
-        cfg.trans_smoothing = 0.1
+        cfg.baseline_lr = 0.003
+        cfg.turn_smoothing = 0.5
+        cfg.trans_smoothing = 0.3
 
         if cfg.extractor_type == "sift":
             cfg.sift_n_features = 3000
