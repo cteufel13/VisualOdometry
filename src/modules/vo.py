@@ -106,9 +106,7 @@ class VisualOdometry:
                 init_dist = np.linalg.norm(current_pos - self.last_pos)
 
                 # sanity clamp for initialization
-                self.baseline_speed = np.clip(
-                    init_dist, self.cfg.init_speed_min, self.cfg.init_speed_max
-                )
+                self.baseline_speed = init_dist
                 current_speed_for_plot = self.baseline_speed
 
                 self.initialized = True

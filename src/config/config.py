@@ -9,7 +9,7 @@ class VOConfig:
     extractor_type: str = "superpoint"  # superpoint or sift
 
     # global scaling
-    global_scale: float = 50.0
+    global_scale: float = 20.0
 
     # feature extractor
     max_keypoints: int = 2048
@@ -35,9 +35,6 @@ class VOConfig:
     pnp_reproj_err: float = 4.0
     kf_min_tracked: int = 80
 
-    # speed logic
-    init_speed_min: float = 0.1
-    init_speed_max: float = 5.0
     turn_thresh: float = 0.01  # rad
     move_thresh: float = 0.01
     turn_smoothing: float = 0.7
@@ -60,7 +57,7 @@ def get_config(dataset: str) -> VOConfig:
         cfg.pnp_reproj_err = 1.0
         cfg.baseline_lr = 0.01
         cfg.turn_smoothing = 0.2
-        cfg.trans_smoothing = 0.2
+        cfg.trans_smoothing = 0.4
 
         # SIFT tuning
         if cfg.extractor_type == "sift":
