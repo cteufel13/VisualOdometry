@@ -55,7 +55,7 @@ def get_config(dataset: str) -> VOConfig:
         cfg.max_keypoints = 2048
         cfg.max_reproj_err = 5.0
         cfg.pnp_reproj_err = 1.0
-        cfg.baseline_lr = 0.01
+        cfg.baseline_lr = 0.002
         cfg.turn_smoothing = 0.2
         cfg.trans_smoothing = 0.4
 
