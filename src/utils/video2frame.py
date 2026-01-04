@@ -20,7 +20,7 @@ def video_to_frames(video_path, output_dir):
     while vidcap.isOpened():
         success, image = vidcap.read()
         if success:
-            save_path = output_dir / f"img_{count:05d}.png"
+            save_path = output_dir / f"img_{count:05d}.jpg"
 
             cv2.imwrite(str(save_path), image)
             count += 1
