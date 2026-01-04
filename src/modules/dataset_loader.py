@@ -176,7 +176,7 @@ class OwnDataset(BaseDataset):
 
         # Get image files
         img_dir = self.custom_base / "images"
-        self.image_files = sorted(img_dir.glob("*.png"))
+        self.image_files = sorted(img_dir.glob("*.jpg"))
         print(f"Loaded {len(self.image_files)} image paths from own dataset")
 
     def _load_custom_k(self, k_path: Path) -> np.ndarray:

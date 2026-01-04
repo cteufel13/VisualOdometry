@@ -5,6 +5,7 @@ from typing import Literal
 import cv2
 import tyro
 
+from config.config import get_config
 from modules.dataset_loader import (
     BaseDataset,
     KittiDataset,
@@ -12,9 +13,7 @@ from modules.dataset_loader import (
     OwnDataset,
     ParkingDataset,
 )
-
 from modules.vo import VisualOdometry
-from config.config import get_config
 
 
 @dataclass
@@ -33,7 +32,6 @@ class Args:
 
 def main(args: Args) -> None:
     """Run main function."""
-    # 1. Initialize Dataset
     print(f"Initializing {args.dataset} dataset from {args.path}...")
 
     loader: BaseDataset
@@ -53,8 +51,6 @@ def main(args: Args) -> None:
     print(f"Loaded {len(loader.image_files)} images.")
     print(f"Camera Matrix K:\n{loader.K}\n")
 
-    # 3. Dummy Loop (Plays back images)
-
     config = get_config(args.dataset)
     vo = VisualOdometry(loader.K, config)
     print("Starting processing loop...")
@@ -67,7 +63,6 @@ def main(args: Args) -> None:
 
         vo.process_frame(img)
 
-    print("\nDone! Skeleton loop finished.")
     input("Press Enter to close the viewer and exit...")
 
 

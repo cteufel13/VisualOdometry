@@ -310,7 +310,7 @@ class VisualOdometry:
         speed: float,
     ) -> None:
         """Send data to Rerun for visualization."""
-        rr.set_time_sequence("frame", self.frame_id)
+        rr.set_time("frame", sequence=self.frame_id)
         rr.log("world/camera/image", rr.Image(img))
 
         # plot speed
