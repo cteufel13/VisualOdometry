@@ -6,6 +6,8 @@ This repository implements a Monocular Visual Odometry (VO) pipeline.
 
 ### 1. Installation
 
+**Option A: Using uv (recommended)**
+
 We use `uv` for fast, modern Python package management.
 
 ```bash
@@ -17,6 +19,21 @@ uv sync
 
 # Activate environment
 source .venv/bin/activate
+
+# (if developing) Install pre-commit hooks
+pre-commit install
+```
+
+**Option B: Using conda**
+
+Alternatively, you can use conda with the provided `environment.yml` file.
+
+```bash
+# Create conda environment
+conda env create -f environment.yml
+
+# Activate environment
+conda activate visual-odometry
 
 # (if developing) Install pre-commit hooks
 pre-commit install
