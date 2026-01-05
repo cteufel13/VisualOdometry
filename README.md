@@ -75,4 +75,4 @@ python src/main.py --dataset parking
 ### 4\. Additional Details
 All screencasts were run on a machine with an i7-14700KF CPU (8 performance cores @ 3.4 GHz, 12 efficiency cores @ 2.5 GHz), a RTX 4080 GPU and 64GB of RAM.
 
-During runtime, our pipeline consumes 55 threads.
+During runtime, our program consumes 20 physical threads when running SuperPoint and 28 when running SIFT.
